@@ -1,0 +1,149 @@
+#!/bin/bash
+# Usage HUD 제어기
+DIR="$HOME/Applications/UsageHUD"
+APP="$DIR/UsageHUD.app"
+BIN="$APP/Contents/MacOS/UsageHUD"
+AGENT="$HOME/Library/LaunchAgents/local.usagehud.plist"
+
+running() { pgrep -f "MacOS/UsageHUD" >/dev/null 2>&1; }
+
+case "${1:-start}" in
+  start|"")
+    if running; then echo "이미 실행 중"; else open "$APP" && echo "HUD 실행됨"; fi ;;
+  stop)
+    pkill -f "MacOS/UsageHUD" && echo "HUD 종료됨" || echo "실행 중이 아님" ;;
+  restart)
+    pkill -f "MacOS/UsageHUD" 2>/dev/null; sleep 0.5; open "$APP"; echo "HUD 재시작됨" ;;
+  status)
+    running && echo "실행 중 (pid $(pgrep -f 'MacOS/UsageHUD' | head -1))" || echo "정지됨"
+    [ -f "$AGENT" ] && echo "로그인 자동 실행: 켜짐" || echo "로그인 자동 실행: 꺼짐" ;;
+  now)
+    python3 "$DIR/stats.py" | python3 -c '
+import json,sys,time
+d=json.load(sys.stdin)
+c=d["claude"]; x=d.get("codex"); k=d.get("disk")
+if c.get("measured"):
+    wk = ("  주 %.0f%%" % c["weekly"]) if c.get("weekly") is not None else ""
+    rs = ""
+    if c.get("resets_at"):
+        rs = "  리셋 " + time.strftime("%H:%M", time.localtime(c["resets_at"]))
+    tag = {"live":"실측","anchored":"실측+보정"}.get(c.get("mode"),"실측")
+    if c.get("mode")=="anchored":
+        tag += " (%.0f%% @ %s 기준)" % (c["anchor_pct"], time.strftime("%H:%M", time.localtime(c["anchor_at"])))
+    print("Claude  5h  %.0f%% [%s]%s%s   $%.0f 상당  %.1fM tokens" % (c["pct"], tag, wk, rs, c["value"], c["tokens"]/1e6))
+else:
+    print("Claude  5h  ~%.0f%% (추정)   $%.0f / 관측최대 %.0f   %.1fM tokens" % (c["pct"],c["value"],c["budget"],c["tokens"]/1e6))
+if x and x.get("primary_pct") is not None:
+    age=(time.time()-x.get("as_of",0))/3600
+    wk=("  주 %.0f%%" % x["secondary_pct"]) if x.get("secondary_pct") is not None else ""
+    print("Codex   5h  %.0f%%%s   (%.1f시간 전 기준)" % (x["primary_pct"], wk, age))
+else:
+    print("Codex   데이터 없음")
+m=d.get("memory")
+if m:
+    lv={0:"정상",1:"경고",2:"위험"}.get(m["severity"],"?")
+    sw = ("  스왑 %.1fG/%.1fG" % (m["swap_used"]/2**30, m["swap_total"]/2**30)) if m["swap_total"] else ""
+    print("RAM     %.0f%% 사용   (%.1fGB / %.0fGB, 여유 %.1fGB)  압박 %s%s" % (
+        m["pct"], m["used"]/2**30, m["total"]/2**30, m["free"]/2**30, lv, sw))
+if k: print("Disk    %.0f%% 사용   (%.0fGB 여유 / %.0fGB)" % (k["pct"],k["free"]/2**30,k["total"]/2**30))
+ss=d.get("sessions",[])
+print("Session %d개   (작업 중 %d, 유휴 %d)" % (len(ss), sum(1 for s in ss if s["state"]!="idle"), sum(1 for s in ss if s["state"]=="idle")))
+' ;;
+  rebuild)
+    bash "$DIR/build.sh" && pkill -f "MacOS/UsageHUD" 2>/dev/null; sleep 0.5; open "$APP"; echo "재빌드 후 실행됨" ;;
+  sessions|ses|ls)
+    python3 "$DIR/stats.py" | python3 -c '
+import json,sys
+d=json.load(sys.stdin)
+mark={"working":"\u25cf 작업 중","running":"\u25d0 실행 중","slow":"\u25b2 지연","attention":"\u25c9 승인 대기?","error":"\u2716 API 오류","stuck":"\u2716 응답 없음","idle":"\u25cb 유휴"}
+ss=d.get("sessions",[])
+if not ss: print("실행 중인 Claude 세션 없음"); raise SystemExit
+def age(a):
+    if a is None: return "-"
+    return "%.0fs"%a if a<60 else ("%.0fm"%(a/60) if a<3600 else "%.1fh"%(a/3600))
+import unicodedata
+def dw(t): return sum(2 if unicodedata.east_asian_width(c) in "WF" else 1 for c in t)
+def pad(t,n):
+    if dw(t)>n-1:
+        while t and dw(t)>n-2: t=t[:-1]
+        t+="\u2026"
+    return t+" "*max(n-dw(t),1)
+print(pad("NAME",36)+pad("PROJECT",18)+pad("STATE",13)+pad("LAST",7)+pad("MEM",8)+pad("TOOL",14)+"PID")
+for s in ss:
+    print(pad(s["name"],36)+pad(s["cwd"],18)+pad(mark.get(s["state"],s["state"]),13)+pad(age(s["age"]),7)+pad(("%.0fMB"%s["mem"]) if s.get("mem") else "-",8)+pad(s.get("tool") or "-",14)+str(s["pid"]))
+busy=sum(1 for s in ss if s["state"] in ("working","running"))
+prob=sum(1 for s in ss if s["state"] in ("slow","attention","error","stuck"))
+tot=sum(s.get("mem") or 0 for s in ss)
+print("\n총 %d개 · 작업 중 %d개 · 메모리 %.1fGB%s" % (len(ss), busy, tot/1024, ("  ⚠ 확인 필요 %d개"%prob) if prob else ""))
+' ;;
+  clean)
+    HOURS="${2:-3}"
+    YES=""
+    for a in "$@"; do [ "$a" = "-y" ] && YES=1; done
+    python3 "$DIR/stats.py" | YES="$YES" HOURS="$HOURS" TTY="$([ -t 0 ] && echo 1)" python3 -c '
+import json,sys,os,subprocess,unicodedata
+hours=float(os.environ.get("HOURS") or 3); yes=bool(os.environ.get("YES")); tty=bool(os.environ.get("TTY"))
+ss=json.load(sys.stdin).get("sessions",[])
+
+# 자기 자신이 속한 세션은 절대 건드리지 않는다
+chain=set(); pid=os.getpid()
+for _ in range(12):
+    if not pid or pid<=1: break
+    chain.add(pid)
+    try: pid=int(subprocess.run(["ps","-o","ppid=","-p",str(pid)],capture_output=True,text=True).stdout.strip() or 0)
+    except Exception: break
+
+def dw(t): return sum(2 if unicodedata.east_asian_width(c) in "WF" else 1 for c in t)
+def pad(t,n):
+    if dw(t)>n-1:
+        while t and dw(t)>n-2: t=t[:-1]
+        t+="\u2026"
+    return t+" "*max(n-dw(t),1)
+
+tgt=[s for s in ss if s["state"]=="idle" and (s["age"] or 0) > hours*3600 and s["pid"] not in chain]
+skipped=[s for s in ss if s["state"]!="idle" and (s["age"] or 0) > hours*3600]
+if not tgt:
+    print("%.0f시간 넘게 유휴인 세션이 없습니다." % hours); raise SystemExit(0)
+print("%.0f시간 넘게 유휴인 세션 %d개 (대화 기록은 보존됩니다):\n" % (hours, len(tgt)))
+for s in tgt:
+    a=s["age"] or 0
+    print("  " + pad(s["name"],38) + "%6.1fh %7.0fMB  pid %s" % (a/3600, s.get("mem") or 0, s["pid"]))
+free=sum(s.get("mem") or 0 for s in tgt)
+print("\n회수 예상: %.0f MB" % free)
+if skipped: print("작업 중이라 제외: %d개" % len(skipped))
+
+if not yes:
+    if not tty:
+        print("\n실제로 종료하려면: hud clean %g -y" % hours); raise SystemExit(0)
+    try: ans=input("\n종료할까요? [y/N] ").strip().lower()
+    except EOFError: ans=""
+    if ans not in ("y","yes"): print("취소했습니다."); raise SystemExit(0)
+
+killed=0
+for s in tgt:
+    try: os.kill(s["pid"], 15); killed+=1
+    except Exception as e: print("  실패 pid %s: %s" % (s["pid"], e))
+print("\n%d개 종료됨, 약 %.0f MB 회수. 이어서 하려면 claude --resume 또는 VS Code에서 세션을 다시 여세요." % (killed, free))
+' ;;
+  config)  ${EDITOR:-open} "$DIR/config.json" ;;
+  login-on)
+    launchctl bootstrap gui/$(id -u) "$AGENT" 2>/dev/null; echo "로그인 자동 실행 켜짐" ;;
+  login-off)
+    launchctl bootout gui/$(id -u)/local.usagehud 2>/dev/null; echo "로그인 자동 실행 꺼짐 (plist는 유지)" ;;
+  *)
+    cat <<'USAGE'
+hud [명령]
+  start      HUD 띄우기 (기본값)
+  stop       종료
+  restart    재시작
+  status     실행 상태 확인
+  now        터미널에 현재 수치 출력
+  sessions   Claude 세션 목록 + 상태 + 메모리
+  clean [N]  N시간(기본 3) 넘게 유휴인 세션 종료 (-y 로 확인 생략)
+  config     기준값 설정 파일 열기
+  rebuild    소스 수정 후 재빌드 + 재실행
+  login-on   로그인 자동 실행 켜기
+  login-off  로그인 자동 실행 끄기
+USAGE
+    ;;
+esac

@@ -1,0 +1,6 @@
+*.app/
+.ceiling.json
+.ratelimits.json
+.toolstats.json
+config.json
+.DS_Store
