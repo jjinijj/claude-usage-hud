@@ -100,7 +100,7 @@ def pad(t,n):
         t+="\u2026"
     return t+" "*max(n-dw(t),1)
 
-tgt=[s for s in ss if s["state"]=="idle" and (s["age"] or 0) > hours*3600 and s["pid"] not in chain]
+tgt=[s for s in ss if s["state"]=="idle" and (s["age"] or 0) > hours*3600 and s["pid"] not in chain and s.get("killable")]
 skipped=[s for s in ss if s["state"]!="idle" and (s["age"] or 0) > hours*3600]
 if not tgt:
     print("%.0f시간 넘게 유휴인 세션이 없습니다." % hours); raise SystemExit(0)

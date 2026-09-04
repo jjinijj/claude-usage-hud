@@ -14,6 +14,7 @@ command -v swiftc >/dev/null || {
 echo "==> 파일 설치: $DEST"
 mkdir -p "$DEST" "$BIN"
 cp "$REPO/src/stats.py" "$REPO/src/statusline.py" "$REPO/src/UsageHUD.swift" "$DEST/"
+cp "$REPO/build.sh" "$DEST/"; chmod +x "$DEST/build.sh"
 [ -f "$DEST/config.json" ] || cp "$REPO/config.example.json" "$DEST/config.json"
 cp "$REPO/bin/hud" "$BIN/hud"; chmod +x "$BIN/hud"
 

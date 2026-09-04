@@ -17,6 +17,7 @@ struct Session {
     var age: Double?
     var mem: Double?       // MB
     var pid: Int32 = 0
+    var killable = false   // verified to actually be a Claude Code process
 }
 
 struct Summary {
@@ -392,7 +393,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func idleSessions(olderThan hours: Double) -> [Session] {
         return view.snapshot.sessions.filter {
-            $0.state == "idle" && ($0.age ?? 0) > hours * 3600 && $0.pid > 0
+            $0.state == "idle" && ($0.age ?? 0) > hours * 3600 && $0.pid > 0 && $0.killable
         }
     }
 
@@ -576,7 +577,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                                     state: raw["state"] as? String ?? "idle",
                                     age: raw["age"] as? Double,
                                     mem: raw["mem"] as? Double,
-                                    pid: Int32((raw["pid"] as? Int) ?? 0)))
+                                    pid: Int32((raw["pid"] as? Int) ?? 0),
+                                    killable: raw["killable"] as? Bool ?? false))
         }
 
         var sum = Summary()

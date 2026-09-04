@@ -558,20 +558,24 @@ def _thresholds(tool, baseline):
     return max(p99 * 3, 300), max(p99 * 10, 1800)
 
 
-def _rss_map(pids):
-    """Resident memory in MB for many pids in one ps call."""
+def _proc_info(pids):
+    """{pid: (rss_mb, is_claude)} in one ps call.
+
+    `is_claude` gates the "kill idle sessions" actions: the pid comes from a file
+    on disk, so verify it really is a Claude Code process before signalling it.
+    """
     if not pids:
         return {}
     try:
-        out = subprocess.run(["ps", "-o", "pid=,rss=", "-p", ",".join(map(str, pids))],
+        out = subprocess.run(["ps", "-o", "pid=,rss=,command=", "-p", ",".join(map(str, pids))],
                              capture_output=True, text=True, timeout=5).stdout
     except Exception:
         return {}
     m = {}
     for line in out.splitlines():
-        parts = line.split()
-        if len(parts) == 2 and parts[0].isdigit():
-            m[int(parts[0])] = int(parts[1]) / 1024.0
+        parts = line.split(None, 2)
+        if len(parts) == 3 and parts[0].isdigit():
+            m[int(parts[0])] = (int(parts[1]) / 1024.0, "claude" in parts[2].lower())
     return m
 
 
@@ -696,9 +700,11 @@ def claude_sessions(prefer_custom=True):
             "age": age,
             "tool": tool,
         })
-    mem = _rss_map([r["pid"] for r in out])
+    info = _proc_info([r["pid"] for r in out])
     for r in out:
-        r["mem"] = mem.get(r["pid"])
+        rss, is_claude = info.get(r["pid"], (None, False))
+        r["mem"] = rss
+        r["killable"] = bool(is_claude)
     order = {"stuck": 0, "error": 1, "attention": 2, "slow": 3,
              "working": 4, "running": 5, "idle": 6}
     out.sort(key=lambda r: (order.get(r["state"], 3), r["age"] if r["age"] is not None else 1e9))
