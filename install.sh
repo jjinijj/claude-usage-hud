@@ -15,11 +15,12 @@ echo "==> 파일 설치: $DEST"
 mkdir -p "$DEST" "$BIN"
 cp "$REPO/src/stats.py" "$REPO/src/statusline.py" "$REPO/src/UsageHUD.swift" "$DEST/"
 cp "$REPO/build.sh" "$DEST/"; chmod +x "$DEST/build.sh"
+cp "$REPO/assets/AppIcon.icns" "$DEST/"
 [ -f "$DEST/config.json" ] || cp "$REPO/config.example.json" "$DEST/config.json"
 cp "$REPO/bin/hud" "$BIN/hud"; chmod +x "$BIN/hud"
 
 echo "==> 빌드"
-rm -rf "$APP"; mkdir -p "$APP/Contents/MacOS"
+rm -rf "$APP"; mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 swiftc -O -o "$APP/Contents/MacOS/UsageHUD" "$DEST/UsageHUD.swift" -framework AppKit
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -31,10 +32,12 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>CFBundleExecutable</key><string>UsageHUD</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>1.0</string>
+  <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>LSUIElement</key><true/>
   <key>LSMinimumSystemVersion</key><string>13.0</string>
 </dict></plist>
 PLIST
+cp "$DEST/AppIcon.icns" "$APP/Contents/Resources/"
 codesign --force -s - "$APP" 2>/dev/null || true
 
 echo "==> 로그인 시 자동 실행 등록"

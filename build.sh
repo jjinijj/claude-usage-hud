@@ -4,7 +4,7 @@ set -e
 DIR="$HOME/Applications/UsageHUD"
 APP="$DIR/UsageHUD.app"
 command -v swiftc >/dev/null || { echo "swiftc 없음. xcode-select --install"; exit 1; }
-rm -rf "$APP"; mkdir -p "$APP/Contents/MacOS"
+rm -rf "$APP"; mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 swiftc -O -o "$APP/Contents/MacOS/UsageHUD" "$DIR/UsageHUD.swift" -framework AppKit
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -16,9 +16,11 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>CFBundleExecutable</key><string>UsageHUD</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>1.0</string>
+  <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>LSUIElement</key><true/>
   <key>LSMinimumSystemVersion</key><string>13.0</string>
 </dict></plist>
 PLIST
+cp "$DIR/AppIcon.icns" "$APP/Contents/Resources/" 2>/dev/null || true
 codesign --force -s - "$APP" 2>/dev/null || true
 echo "built: $APP"
