@@ -31,42 +31,75 @@ S 2/8   C 73%   X 1%   R 3.3G   D 16G
 
 ## 설치
 
-Xcode Command Line Tools 만 있으면 됩니다. 다른 의존성은 없습니다.
+**필요한 것은 Xcode Command Line Tools 하나뿐입니다.** 없으면 먼저 설치하세요:
 
 ```bash
-git clone <이 저장소> usage-hud
+xcode-select --install
+```
+
+레포를 받아 설치 스크립트를 실행합니다:
+
+```bash
+git clone <저장소 주소> usage-hud
 cd usage-hud
 ./install.sh
 ```
 
-소스를 그 자리에서 컴파일하므로 코드 서명·공증 문제가 없습니다.
-`~/.local/bin` 이 `PATH` 에 있어야 `hud` 명령을 쓸 수 있습니다.
+끝입니다. 스크립트가 알아서 하는 일:
 
-제거는 `./uninstall.sh` 입니다. Claude 대화 기록은 건드리지 않습니다.
+1. `~/Applications/UsageHUD/` 에 소스를 복사
+2. `swiftc` 로 그 자리에서 앱을 빌드 — 남이 서명한 바이너리를 받는 게 아니라
+   내 맥에서 컴파일하므로 Gatekeeper 차단이 없습니다
+3. `~/.local/bin/hud` CLI 설치
+4. 로그인 시 자동 실행 등록 (LaunchAgent)
+5. Claude Code `statusLine` 훅 등록 — **이미 쓰는 설정이 있으면 건드리지 않습니다**
+6. HUD 실행
+
+빌드가 끝나면 화면 **우측 상단**에 HUD 가 떠 있습니다. 안 보이면 다른 모니터나
+화면 밖에 있을 수 있으니 `hud restart` 로 위치를 초기화하세요.
+
+`hud` 명령이 "command not found" 로 나오면 `PATH` 에 추가하세요:
+
+```bash
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc && source ~/.zshrc
+```
+
+동작 확인:
+
+```bash
+hud now        # 현재 수치가 터미널에 출력되면 정상
+```
+
+업데이트는 `git pull && ./install.sh`, 제거는 `./uninstall.sh` 입니다.
+제거해도 Claude 대화 기록은 건드리지 않습니다.
 
 ## 표시되는 값
 
-| 행 | 출처 | 정확도 |
-|---|---|---|
-| **Claude** | Claude Code `statusLine` 훅이 넘겨주는 서버 실측 `rate_limits` | 실측 |
-| **Codex** | `~/.codex/sessions/**` 롤아웃에 기록된 `rate_limits` | 실측 |
-| **RAM** | `vm_stat` — 앱 + wired + 압축됨 (활성 상태 보기와 동일한 공식) | 실측 |
-| **Disk** | `df` | 실측 |
+| 행 | 출처 |
+|---|---|
+| **Claude** | 데스크톱 앱이 15분마다 기록하는 `plan-usage-history.json` (서버 실측) |
+| **Codex** | `~/.codex/sessions/**` 롤아웃에 기록된 `rate_limits` (서버 실측) |
+| **RAM** | `vm_stat` — 앱 + wired + 압축됨 (활성 상태 보기와 동일한 공식) |
+| **Disk** | `df` |
 
 ### Claude 값에 대하여
 
-Claude Code 는 남은 한도를 디스크에 저장하지 않습니다. 유일한 공식 통로가
-`statusLine` 훅이고, 이 훅은 **터미널 TUI 세션에서만** 실행됩니다.
-VS Code 확장이나 데스크톱 앱에서는 상태줄을 그리지 않아 훅이 호출되지 않습니다.
+Claude 데스크톱 앱은 서버가 알려준 실제 사용률을 **15분마다**
+`~/Library/Application Support/Claude/plan-usage-history.json` 에 기록합니다.
+HUD 는 이 파일을 읽습니다. 앱이 켜져 있기만 하면 되고, 따로 할 일이 없습니다.
 
-그래서 HUD 는 3단계로 동작합니다:
+터미널에서 `claude` 를 쓰면 `statusLine` 훅이 같은 값을 더 자주 갱신합니다.
+HUD 는 **두 출처 중 더 최신인 쪽**을 자동으로 고릅니다.
 
-1. **실측** — 터미널 세션이 방금 응답을 받음
-2. **실측 + 보정** — 터미널을 껐어도 같은 5시간 블록 안이면, 마지막 실측값을
-   기준점으로 잡고 로컬 토큰 사용량 증가분을 이어붙임
-3. **추정** (`~` 표시) — 블록이 리셋되면, 실측값에서 역산해둔 천장을 기준으로 계산
+실측값이 낡았을 때를 대비해 두 단계가 더 있습니다:
 
-터미널에서 `claude` 를 한 번 쓰면 1단계로 돌아갑니다. 안 써도 몇 % 오차로 굴러갑니다.
+1. **실측** — 최근 값이 있음
+2. **실측 + 보정** — 같은 5시간 블록 안이면, 마지막 실측값을 기준점으로 잡고
+   로컬 트랜스크립트의 토큰 사용량 증가분을 이어붙임
+3. **추정** (`~` 표시) — 기준점이 없으면, 과거 실측값에서 역산해둔 천장으로 계산
+
+데스크톱 앱도 터미널도 안 쓰는 환경에서만 3단계로 떨어집니다.
+`statusLine` 훅은 설치 시 자동 등록되지만, 이미 쓰고 있는 설정이 있으면 건드리지 않습니다.
 
 ## 세션 상태
 
@@ -118,6 +151,7 @@ hud login-on | login-off
 
 15초마다 `stats.py` 를 실행해 로컬 파일만 읽습니다 (약 0.2초).
 
+- `~/Library/Application Support/Claude/plan-usage-history.json` — Claude 실제 사용률
 - `~/.claude/projects/**/*.jsonl` — 토큰 사용량, 세션 상태, 세션 제목
 - `~/.claude/sessions/*.json` — 실행 중인 세션 목록
 - `~/.codex/sessions/**/*.jsonl` — Codex 한도
@@ -133,6 +167,8 @@ hud login-on | login-off
 - Xcode Command Line Tools (`xcode-select --install`)
 - Python 3.9 이상 — macOS 기본 제공분으로 충분
 
+Claude 실측값을 보려면 **Claude 데스크톱 앱**이 한 번이라도 실행된 적 있어야 합니다.
+없으면 로컬 트랜스크립트 기반 추정치로 동작합니다.
 Codex 를 안 쓰면 해당 행은 "데이터 없음" 으로 표시되고 나머지는 정상 동작합니다.
 
 ## 라이선스

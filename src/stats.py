@@ -263,6 +263,50 @@ def _save_implied_ceiling(value):
         pass
 
 
+PLAN_HISTORY = os.path.join(HOME, "Library", "Application Support", "Claude",
+                            "plan-usage-history.json")
+
+
+def desktop_plan_usage():
+    """The Claude desktop app samples real plan utilisation every ~15 minutes.
+
+    Same numbers the statusLine hook reports, but recorded without a terminal
+    session — so this keeps working while you live in VS Code or the app.
+    """
+    try:
+        with open(PLAN_HISTORY) as f:
+            samples = json.load(f).get("samples") or []
+    except Exception:
+        return None
+    if not samples:
+        return None
+    last = samples[-1]
+    u = last.get("u") or {}
+    if u.get("fh") is None:
+        return None
+    return {"five_hour": float(u["fh"]),
+            "seven_day": float(u["sd"]) if u.get("sd") is not None else None,
+            "five_reset": None,
+            "as_of": last.get("t", 0) / 1000.0,
+            "source": "desktop"}
+
+
+def best_real_usage():
+    """Freshest of the two real sources: the desktop history file or the hook cache."""
+    cands = [c for c in (desktop_plan_usage(), claude_rate_limits()) if c]
+    if not cands:
+        return None
+    best = max(cands, key=lambda c: c.get("as_of") or 0)
+    # the hook is the only source that knows when the window resets — borrow it
+    if not best.get("five_reset"):
+        for c in cands:
+            r = c.get("five_reset")
+            if r and r > time.time():
+                best = dict(best, five_reset=r)
+                break
+    return best
+
+
 def anchored_claude(real, now):
     """Scale the last real reading by how much local usage grew since it was taken.
 
@@ -309,8 +353,12 @@ def claude_rate_limits(max_age=None):
     week, week_reset = _pct(rl.get("seven_day"))
     if five is None and week is None:
         return None
+    now = time.time()
+    if five_reset is not None and not (now - 86400 < float(five_reset) < now + 8 * 86400):
+        five_reset = None                 # implausible -> treat as unknown
     return {"five_hour": five, "five_reset": five_reset,
-            "seven_day": week, "seven_reset": week_reset, "as_of": d.get("at")}
+            "seven_day": week, "seven_reset": week_reset,
+            "as_of": d.get("at"), "source": "hook"}
 
 
 def _all_cost_events(days=30):
@@ -671,8 +719,13 @@ def main():
         "budget": budget,
         "measured": False,
     }
-    real = claude_rate_limits()
+    real = best_real_usage()
     anchored = anchored_claude(real, time.time())
+    if not anchored and real and real["five_hour"] is not None:
+        anchored = {"pct": real["five_hour"], "cost": cl["cost"], "tokens": cl["tokens"],
+                    "fresh": time.time() - (real.get("as_of") or 0) < 300,
+                    "anchor_pct": real["five_hour"], "anchor_at": real.get("as_of") or 0,
+                    "resets_at": real.get("five_reset")}
     if anchored:
         claude.update({
             "pct": anchored["pct"],
@@ -682,6 +735,7 @@ def main():
             "mode": "live" if anchored["fresh"] else "anchored",
             "weekly": real["seven_day"],
             "resets_at": anchored["resets_at"],
+            "source": real.get("source", "hook"),
             "anchor_pct": anchored["anchor_pct"],
             "anchor_at": anchored["anchor_at"],
         })

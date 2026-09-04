@@ -8,6 +8,25 @@ import json, os, sys, time
 
 CACHE = os.path.join(os.path.expanduser("~"), "Applications", "UsageHUD", ".ratelimits.json")
 
+def _plausible(rl):
+    """Guard the cache against malformed or synthetic payloads."""
+    now = time.time()
+    for v in rl.values():
+        if not isinstance(v, dict):
+            continue
+        pct = v.get("used_percentage")
+        if pct is None:
+            pct = v.get("utilization")
+            if pct is not None and pct <= 1:
+                pct *= 100
+        if pct is not None and not (0 <= float(pct) <= 100):
+            return False
+        r = v.get("resets_at")
+        if r is not None and not (now - 86400 < float(r) < now + 8 * 86400):
+            return False
+    return True
+
+
 def main():
     raw = sys.stdin.read()
     try:
@@ -16,7 +35,7 @@ def main():
         return
 
     rl = p.get("rate_limits")
-    if isinstance(rl, dict) and rl:
+    if isinstance(rl, dict) and rl and _plausible(rl):
         try:
             with open(CACHE, "w") as f:
                 json.dump({"at": time.time(), "rate_limits": rl,
