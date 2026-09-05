@@ -75,6 +75,45 @@ final class HUDView: NSView {
             : NSRect(x: bounds.width - 26, y: bounds.height - 24, width: 18, height: 18)
     }
 
+    /// Top edge of the session list, mirroring the draw() layout.
+    private func sessionsTop() -> CGFloat {
+        return bounds.height - L.padTop
+             - CGFloat(snapshot.gauges.count) * L.gaugeH - L.sepBlock
+    }
+
+    /// Which session row sits under this point, if any.
+    func sessionIndex(at p: NSPoint) -> Int? {
+        guard !compact, !snapshot.sessions.isEmpty, p.y <= sessionsTop() else { return nil }
+        let idx = Int((sessionsTop() - p.y) / L.sessionH)
+        return (idx >= 0 && idx < snapshot.sessions.count) ? idx : nil
+    }
+
+    /// Right-clicking a session row opens that session's menu; elsewhere, the panel menu.
+    override func menu(for event: NSEvent) -> NSMenu? {
+        let p = convert(event.locationInWindow, from: nil)
+        if let i = sessionIndex(at: p), let build = sessionMenu {
+            return build(snapshot.sessions[i])
+        }
+        return super.menu(for: event)
+    }
+
+    var sessionMenu: ((Session) -> NSMenu)?
+    private var hoverIndex: Int? { didSet { if oldValue != hoverIndex { needsDisplay = true } } }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        trackingAreas.forEach(removeTrackingArea)
+        addTrackingArea(NSTrackingArea(rect: bounds,
+            options: [.mouseMoved, .mouseEnteredAndExited, .activeAlways, .inVisibleRect],
+            owner: self))
+    }
+
+    override func mouseMoved(with event: NSEvent) {
+        hoverIndex = sessionIndex(at: convert(event.locationInWindow, from: nil))
+    }
+
+    override func mouseExited(with event: NSEvent) { hoverIndex = nil }
+
     override func mouseDown(with event: NSEvent) {
         let p = convert(event.locationInWindow, from: nil)
         if toggleRect().insetBy(dx: -4, dy: -4).contains(p) {
@@ -244,8 +283,14 @@ final class HUDView: NSView {
             text("실행 중인 세션 없음", x: L.padX, y: y - 10, size: 10.5, alpha: 0.35)
             y -= L.sessionH
         }
-        for s in snapshot.sessions {
+        for (i, s) in snapshot.sessions.enumerated() {
             y -= L.sessionH
+            if i == hoverIndex {
+                let band = NSRect(x: L.padX - 5, y: y - 3, width: w - (L.padX - 5) * 2,
+                                  height: L.sessionH)
+                NSColor.white.withAlphaComponent(0.07).setFill()
+                NSBezierPath(roundedRect: band, xRadius: 4, yRadius: 4).fill()
+            }
             let dotR = NSRect(x: L.padX + 1, y: y + 4, width: 6, height: 6)
             stateColor(s.state).setFill()
             NSBezierPath(ovalIn: dotR).fill()
@@ -302,6 +347,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         panel.backgroundColor = .clear
         panel.isOpaque = false
         panel.hasShadow = true
+        panel.acceptsMouseMovedEvents = true
         panel.appearance = NSAppearance(named: .darkAqua)
 
         let blur = NSVisualEffectView(frame: rect)
@@ -320,6 +366,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         compact = UserDefaults.standard.bool(forKey: "hudCompact")
         view.compact = compact
         view.onToggle = { [weak self] in self?.toggleCompact() }
+        view.sessionMenu = { [weak self] s in self?.buildSessionMenu(s) ?? NSMenu() }
         blur.addSubview(view)
         panel.contentView = blur
 
@@ -427,6 +474,51 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         done.informativeText = String(format: "약 %.0fMB 회수됨", mb)
         done.addButton(withTitle: "확인")
         done.runModal()
+    }
+
+    private func buildSessionMenu(_ s: Session) -> NSMenu {
+        let m = NSMenu()
+        let head = m.addItem(withTitle: s.name, action: nil, keyEquivalent: "")
+        head.attributedTitle = NSAttributedString(string: s.name, attributes:
+            [.font: NSFont.systemFont(ofSize: 13, weight: .semibold)])
+        let age = s.age.map { $0 < 3600 ? String(format: "%.0f분", $0 / 60)
+                                        : String(format: "%.1f시간", $0 / 3600) } ?? "–"
+        let mem = s.mem.map { String(format: " · %.0fMB", $0) } ?? ""
+        m.addItem(withTitle: "PID \(s.pid) · \(age) 전\(mem)", action: nil, keyEquivalent: "")
+        m.addItem(.separator())
+
+        if s.killable {
+            let kill = m.addItem(withTitle: "이 세션 종료", action: #selector(killOne(_:)),
+                                 keyEquivalent: "")
+            kill.target = self
+            kill.representedObject = s
+        } else {
+            m.addItem(withTitle: "종료 불가 — 프로세스 확인 실패", action: nil, keyEquivalent: "")
+        }
+        return m
+    }
+
+    @objc private func killOne(_ sender: NSMenuItem) {
+        guard let s = sender.representedObject as? Session, s.killable, s.pid > 0 else { return }
+
+        let alert = NSAlert()
+        alert.messageText = "이 세션을 종료할까요?"
+        var body = "\(s.name)\nPID \(s.pid)"
+        if s.state != "idle" {
+            body += "\n\n⚠ 지금 작업 중입니다. 진행 중인 내용이 중단됩니다."
+            alert.alertStyle = .critical
+        } else {
+            alert.alertStyle = .warning
+        }
+        body += "\n\n대화 기록은 지워지지 않습니다 — claude --resume 으로 이어서 할 수 있습니다."
+        alert.informativeText = body
+        alert.addButton(withTitle: "종료")
+        alert.addButton(withTitle: "취소")
+
+        NSApp.activate(ignoringOtherApps: true)
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        kill(s.pid, SIGTERM)
+        refresh()
     }
 
     @objc private func setOpacity(_ sender: NSMenuItem) {
