@@ -323,6 +323,9 @@ final class HUDPanel: NSPanel {
 // MARK: - App
 
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
+    /// Killing from outside makes the owning window report the exit as a failure.
+    /// It is SIGTERM's normal code (128+15) and the session still archives cleanly.
+    static let exitCodeNote = "종료 뒤 그 창에 \"exited with code 143\" 이 뜹니다 — SIGTERM 의 정상 코드이고, 세션은 정상적으로 보관됩니다."
     private var panel: HUDPanel!
     private var view: HUDView!
     private var timer: Timer?
@@ -457,7 +460,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }.joined(separator: "\n")
         let more = victims.count > 12 ? "\n  … 외 \(victims.count - 12)개" : ""
         alert.informativeText = list + more
-            + String(format: "\n\n약 %.0fMB를 회수합니다.\n대화 기록은 지워지지 않습니다 — claude --resume 으로 이어서 할 수 있습니다.", mb)
+            + String(format: "\n\n약 %.0fMB를 회수합니다.\n대화 기록은 지워지지 않습니다 — claude --resume 으로 이어서 할 수 있습니다.\n", mb)
+            + Self.exitCodeNote
         alert.alertStyle = .warning
         alert.addButton(withTitle: "종료")
         alert.addButton(withTitle: "취소")
@@ -511,6 +515,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             alert.alertStyle = .warning
         }
         body += "\n\n대화 기록은 지워지지 않습니다 — claude --resume 으로 이어서 할 수 있습니다."
+        body += "\n" + Self.exitCodeNote
         alert.informativeText = body
         alert.addButton(withTitle: "종료")
         alert.addButton(withTitle: "취소")
