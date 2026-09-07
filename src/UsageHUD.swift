@@ -27,6 +27,12 @@ struct MemApp {
     var count: Int
 }
 
+struct CacheEntry {
+    var label: String
+    var mb: Double
+    var children: [(String, Double)] = []
+}
+
 struct Summary {
     var active = 0
     var total = 0
@@ -41,6 +47,7 @@ struct Snapshot {
     var sessions: [Session]
     var summary = Summary()
     var topMemory: [MemApp] = []
+    var diskCaches: [CacheEntry] = []
     static let placeholder = Snapshot(
         gauges: [Gauge(title: "Claude", detail: "loading…", pct: nil),
                  Gauge(title: "Codex",  detail: "loading…", pct: nil),
@@ -131,7 +138,8 @@ final class HUDView: NSView {
         let p = convert(event.locationInWindow, from: nil)
         hoverIndex = sessionIndex(at: p)
         let g = gaugeIndex(at: p)
-        hoverGauge = (g != nil && snapshot.gauges[g!].title == "RAM") ? g : nil
+        if let g, ["RAM", "Disk"].contains(snapshot.gauges[g].title) { hoverGauge = g }
+        else { hoverGauge = nil }
     }
 
     override func mouseExited(with event: NSEvent) { hoverIndex = nil; hoverGauge = nil }
@@ -142,7 +150,8 @@ final class HUDView: NSView {
             onToggle?()
             return
         }
-        if let i = gaugeIndex(at: p), snapshot.gauges[i].title == "RAM" {
+        if let i = gaugeIndex(at: p),
+           snapshot.gauges[i].title == "RAM" || snapshot.gauges[i].title == "Disk" {
             onGaugeClick?(snapshot.gauges[i].title, event)
             return
         }
@@ -403,8 +412,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         view.onToggle = { [weak self] in self?.toggleCompact() }
         view.sessionMenu = { [weak self] s in self?.buildSessionMenu(s) ?? NSMenu() }
         view.onGaugeClick = { [weak self] title, event in
-            guard title == "RAM" else { return }
-            self?.showMemoryBreakdown(event)
+            if title == "RAM" { self?.showMemoryBreakdown(event) }
+            else if title == "Disk" { self?.showDiskBreakdown(event) }
         }
         blur.addSubview(view)
         panel.contentView = blur
@@ -528,8 +537,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             m.addItem(withTitle: "데이터 없음", action: nil, keyEquivalent: "")
         }
         for a in apps {
-            let size = a.mb >= 1024 ? String(format: "%.2f GB", a.mb / 1024)
-                                    : String(format: "%.0f MB", a.mb)
+            let size = Self.sizeText(a.mb)
             /* 긴 프로세스 이름(com.apple.WebKit.WebContent 등)이 열을 밀지 않게 자른다. */
             let name = a.name.count > 22 ? String(a.name.prefix(21)) + "…" : a.name
             var line = String(format: "%-22@ %8@", name as NSString, size as NSString)
@@ -549,6 +557,45 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if let g = view.snapshot.gauges.first(where: { $0.title == "RAM" }) {
             m.addItem(withTitle: g.detail, action: nil, keyEquivalent: "")
         }
+        m.popUp(positioning: nil, at: event.locationInWindow, in: view.superview)
+    }
+
+    private static func sizeText(_ mb: Double) -> String {
+        return mb >= 1024 ? String(format: "%.1f GB", mb / 1024)
+                          : String(format: "%.0f MB", mb)
+    }
+
+    /// Clicking the Disk row lists what can be deleted and regenerated.
+    private func showDiskBreakdown(_ event: NSEvent) {
+        let entries = view.snapshot.diskCaches
+        let m = NSMenu()
+        let head = m.addItem(withTitle: "정리 가능한 캐시", action: nil, keyEquivalent: "")
+        head.attributedTitle = NSAttributedString(string: "정리 가능한 캐시", attributes:
+            [.font: NSFont.systemFont(ofSize: 13, weight: .semibold)])
+
+        if entries.isEmpty {
+            m.addItem(withTitle: "아직 측정 전입니다", action: nil, keyEquivalent: "")
+        }
+        let mono = NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .regular)
+        var total = 0.0
+        for e in entries {
+            total += e.mb
+            let line = String(format: "%-22@ %8@", e.label as NSString,
+                              Self.sizeText(e.mb) as NSString)
+            m.addItem(withTitle: line, action: nil, keyEquivalent: "")
+                .attributedTitle = NSAttributedString(string: line, attributes: [.font: mono])
+            for (name, mb) in e.children {
+                let sub = String(format: "   %-19@ %8@", name as NSString,
+                                 Self.sizeText(mb) as NSString)
+                m.addItem(withTitle: sub, action: nil, keyEquivalent: "")
+                    .attributedTitle = NSAttributedString(string: sub, attributes:
+                        [.font: mono, .foregroundColor: NSColor.secondaryLabelColor])
+            }
+        }
+        m.addItem(.separator())
+        m.addItem(withTitle: "합계 \(Self.sizeText(total)) · 지우면 다시 생성됩니다",
+                  action: nil, keyEquivalent: "")
+        m.addItem(withTitle: "크기는 1시간마다 다시 잽니다", action: nil, keyEquivalent: "")
         m.popUp(positioning: nil, at: event.locationInWindow, in: view.superview)
     }
 
@@ -780,7 +827,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                               maxMb: raw["max"] as? Double ?? 0,
                               count: raw["count"] as? Int ?? 0))
         }
-        return Snapshot(gauges: gauges, sessions: sessions, summary: sum, topMemory: top)
+        var caches: [CacheEntry] = []
+        for raw in (json["disk_caches"] as? [[String: Any]] ?? []) {
+            let kids = (raw["children"] as? [[String: Any]] ?? []).map {
+                ($0["label"] as? String ?? "?", $0["mb"] as? Double ?? 0)
+            }
+            caches.append(CacheEntry(label: raw["label"] as? String ?? "?",
+                                     mb: raw["mb"] as? Double ?? 0, children: kids))
+        }
+        return Snapshot(gauges: gauges, sessions: sessions, summary: sum,
+                        topMemory: top, diskCaches: caches)
     }
 }
 

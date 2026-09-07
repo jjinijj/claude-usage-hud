@@ -204,6 +204,70 @@ def memory_usage():
         return None
 
 
+DISKSCAN_PATH = os.path.join(HOME, "Applications", "UsageHUD", ".diskscan.json")
+
+# Regenerable space, in the order it is worth reclaiming. Sizes come from `du`,
+# which is slow enough (~3s all together) that the result is cached for an hour.
+CACHE_TARGETS = [
+    ("~/Library/Caches", os.path.join(HOME, "Library", "Caches"), True),
+    ("~/.cache", os.path.join(HOME, ".cache"), True),
+    ("Xcode DerivedData", os.path.join(HOME, "Library", "Developer", "Xcode", "DerivedData"), False),
+    ("npm 캐시", os.path.join(HOME, ".npm", "_cacache"), False),
+    ("~/Library/Logs", os.path.join(HOME, "Library", "Logs"), False),
+    ("시뮬레이터 런타임", "/Library/Developer/CoreSimulator/Images", False),
+]
+
+
+def _du_mb(path, depth=None, timeout=45):
+    cmd = ["du", "-k"] + (["-d", str(depth)] if depth is not None else ["-s"]) + [path]
+    try:
+        out = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout).stdout
+    except Exception:
+        return []
+    rows = []
+    for line in out.splitlines():
+        parts = line.split(None, 1)
+        if len(parts) == 2 and parts[0].isdigit():
+            rows.append((int(parts[0]) / 1024.0, parts[1]))
+    return rows
+
+
+def disk_caches(refresh_after=3600):
+    """Sizes of regenerable directories, cached hourly because du is slow."""
+    try:
+        with open(DISKSCAN_PATH) as f:
+            d = json.load(f)
+        if time.time() - d.get("at", 0) < refresh_after:
+            return d.get("entries", [])
+    except Exception:
+        pass
+
+    entries = []
+    for label, path, detail in CACHE_TARGETS:
+        if not os.path.isdir(path):
+            continue
+        if detail:
+            rows = _du_mb(path, depth=1)
+            if not rows:
+                continue
+            total = max(rows, key=lambda r: r[0])[0]
+            kids = sorted((r for r in rows if r[1] != path), key=lambda r: -r[0])[:3]
+            entries.append({"label": label, "mb": total,
+                            "children": [{"label": os.path.basename(k[1]), "mb": k[0]}
+                                         for k in kids if k[0] >= 100]})
+        else:
+            rows = _du_mb(path)
+            if rows:
+                entries.append({"label": label, "mb": rows[0][0], "children": []})
+    entries.sort(key=lambda e: -e["mb"])
+    try:
+        with open(DISKSCAN_PATH, "w") as f:
+            json.dump({"at": time.time(), "entries": entries}, f)
+    except OSError:
+        pass
+    return entries
+
+
 def top_memory(limit=8):
     """Memory grouped by owning app, plus each group's largest single process.
 
@@ -903,6 +967,7 @@ def main():
         "memory": memory_usage(),
         "top_memory": top_memory(),
         "disk": disk_usage(c["disk_volume"]),
+        "disk_caches": disk_caches(),
         "sessions": claude_sessions(c.get("prefer_custom_title", True)),
     }
     json.dump(result, sys.stdout)
