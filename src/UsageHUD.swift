@@ -635,7 +635,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             gauges.append(Gauge(title: "Claude", detail: "데이터 없음", pct: nil))
         }
 
-        if let x = json["codex"] as? [String: Any], let p = x["primary_pct"] as? Double {
+        if let x = json["codex"] as? [String: Any], x["expired"] as? Bool == true {
+            /* 5시간 창이 이미 여러 번 리셋된 값이라 숫자를 보여주면 거짓말이 된다. */
+            let age = Date().timeIntervalSince1970 - ((x["as_of"] as? Double) ?? 0)
+            gauges.append(Gauge(title: "Codex",
+                                detail: String(format: "만료 (%.0f시간 전 기록)", age / 3600),
+                                pct: nil, stale: true))
+        } else if let x = json["codex"] as? [String: Any], let p = x["primary_pct"] as? Double {
             let weekly = (x["secondary_pct"] as? Double).map { String(format: " · 주 %.0f%%", $0) } ?? ""
             let age = Date().timeIntervalSince1970 - ((x["as_of"] as? Double) ?? 0)
             gauges.append(Gauge(title: "Codex", detail: String(format: "5h %.0f%%", p) + weekly,

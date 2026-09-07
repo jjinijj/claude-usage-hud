@@ -33,7 +33,9 @@ if c.get("measured"):
     print("Claude  5h  %.0f%% [%s]%s%s   $%.0f 상당  %.1fM tokens" % (c["pct"], tag, wk, rs, c["value"], c["tokens"]/1e6))
 else:
     print("Claude  5h  ~%.0f%% (추정)   $%.0f / 관측최대 %.0f   %.1fM tokens" % (c["pct"],c["value"],c["budget"],c["tokens"]/1e6))
-if x and x.get("primary_pct") is not None:
+if x and x.get("expired"):
+    print("Codex   만료   (%.0f시간 전 기록 — 5시간 창이 이미 지났습니다)" % ((time.time()-x["as_of"])/3600))
+elif x and x.get("primary_pct") is not None:
     age=(time.time()-x.get("as_of",0))/3600
     wk=("  주 %.0f%%" % x["secondary_pct"]) if x.get("secondary_pct") is not None else ""
     print("Codex   5h  %.0f%%%s   (%.1f시간 전 기준)" % (x["primary_pct"], wk, age))

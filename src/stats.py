@@ -85,38 +85,61 @@ def claude_usage(window_sec=5 * 3600):
                 cost += (i * pi + o * po + cw * pw + cr * pr) / 1_000_000
     return {"tokens": tokens, "cost": cost}
 
-def codex_usage():
+def codex_usage(max_files=12):
+    """Newest Codex rate limits, by event timestamp rather than file mtime.
+
+    Three things make the naive read wrong. Codex resumes old threads and appends
+    to their original rollout file, so a June file can hold today's numbers — and
+    a fresh session writes a rollout before it has any limits in it. So we cannot
+    trust file order, and we cannot stop at the first file that happens to have a
+    value. And a 5-hour-window percentage from days ago is not stale, it is
+    meaningless: that window has reset many times since.
+    """
     root = os.path.join(HOME, ".codex", "sessions")
     files = glob.glob(os.path.join(root, "**", "*.jsonl"), recursive=True)
     files.sort(key=lambda f: os.path.getmtime(f), reverse=True)
-    for f in files[:8]:
-        latest = None
+
+    best = None          # (event_ts, rate_limits dict)
+    for f in files[:max_files]:
         try:
             fh = open(f, errors="ignore")
         except OSError:
             continue
         with fh:
             for line in fh:
-                if '"rate_limits"' not in line:
+                if "rate_limits" not in line:
                     continue
                 try:
                     d = json.loads(line)
                 except Exception:
                     continue
                 rl = find_rate_limits(d)
-                if rl and rl.get("primary"):
-                    latest = (rl, os.path.getmtime(f))
-        if latest:
-            rl, mtime = latest
-            p, s = rl.get("primary") or {}, rl.get("secondary") or {}
-            return {
-                "primary_pct": p.get("used_percent"),
-                "primary_reset": p.get("resets_at"),
-                "secondary_pct": s.get("used_percent"),
-                "secondary_reset": s.get("resets_at"),
-                "as_of": mtime,
-            }
-    return None
+                if not (rl and rl.get("primary")):
+                    continue
+                ts = parse_ts(d.get("timestamp", "")) or os.path.getmtime(f)
+                if best is None or ts > best[0]:
+                    best = (ts, rl)
+    if not best:
+        return None
+
+    as_of, rl = best
+    p, sec = rl.get("primary") or {}, rl.get("secondary") or {}
+
+    # Past one full window the number describes a window that no longer exists.
+    window_s = (p.get("window_minutes") or 300) * 60
+    if time.time() - as_of > window_s:
+        return {"primary_pct": None, "secondary_pct": None, "as_of": as_of,
+                "expired": True}
+
+    return {
+        "primary_pct": p.get("used_percent"),
+        "primary_reset": p.get("resets_at"),
+        "secondary_pct": sec.get("used_percent"),
+        "secondary_reset": sec.get("resets_at"),
+        "as_of": as_of,
+        "expired": False,
+    }
+
 
 def find_rate_limits(node):
     if isinstance(node, dict):
