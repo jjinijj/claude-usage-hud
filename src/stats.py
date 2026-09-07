@@ -204,6 +204,39 @@ def memory_usage():
         return None
 
 
+def top_memory(limit=8):
+    """Memory grouped by owning app, plus each group's largest single process.
+
+    Helpers are grouped by the outermost `.app` in their path, so Chrome's 30
+    renderers and VS Code's extension hosts land under their parent. The largest
+    single process is kept because that is usually what actually went wrong —
+    one leaking extension host reads very differently from many small tabs.
+    """
+    try:
+        out = subprocess.run(["ps", "-Ao", "rss=,comm="], capture_output=True,
+                             text=True, timeout=8).stdout
+    except Exception:
+        return []
+    groups = {}
+    for line in out.splitlines():
+        parts = line.strip().split(None, 1)
+        if len(parts) != 2 or not parts[0].isdigit():
+            continue
+        rss_mb, path = int(parts[0]) / 1024.0, parts[1]
+        if "claude-code" in path or "anthropic.claude-code" in path:
+            name = "Claude Code"                         # sessions, not the app
+        elif (idx := path.find(".app/")) != -1:
+            name = os.path.basename(path[:idx])          # outermost bundle
+        else:
+            name = os.path.basename(path)
+        g = groups.setdefault(name, {"name": name, "mb": 0.0, "max": 0.0, "count": 0})
+        g["mb"] += rss_mb
+        g["max"] = max(g["max"], rss_mb)
+        g["count"] += 1
+    ranked = sorted(groups.values(), key=lambda g: -g["mb"])
+    return [g for g in ranked if g["mb"] >= 50][:limit]
+
+
 def disk_usage(volume):
     try:
         out = subprocess.run(["df", "-k", volume], capture_output=True, text=True, timeout=5).stdout
@@ -868,6 +901,7 @@ def main():
         "claude": claude,
         "codex": codex_usage(),
         "memory": memory_usage(),
+        "top_memory": top_memory(),
         "disk": disk_usage(c["disk_volume"]),
         "sessions": claude_sessions(c.get("prefer_custom_title", True)),
     }

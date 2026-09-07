@@ -20,6 +20,13 @@ struct Session {
     var killable = false   // verified to actually be a Claude Code process
 }
 
+struct MemApp {
+    var name: String
+    var mb: Double
+    var maxMb: Double
+    var count: Int
+}
+
 struct Summary {
     var active = 0
     var total = 0
@@ -33,6 +40,7 @@ struct Snapshot {
     var gauges: [Gauge]
     var sessions: [Session]
     var summary = Summary()
+    var topMemory: [MemApp] = []
     static let placeholder = Snapshot(
         gauges: [Gauge(title: "Claude", detail: "loading…", pct: nil),
                  Gauge(title: "Codex",  detail: "loading…", pct: nil),
@@ -75,6 +83,15 @@ final class HUDView: NSView {
             : NSRect(x: bounds.width - 26, y: bounds.height - 24, width: 18, height: 18)
     }
 
+    /// Which gauge row sits under this point (0-based), if any.
+    func gaugeIndex(at p: NSPoint) -> Int? {
+        guard !compact else { return nil }
+        let top = bounds.height - L.padTop
+        guard p.y <= top else { return nil }
+        let idx = Int((top - p.y) / L.gaugeH)
+        return (idx >= 0 && idx < snapshot.gauges.count) ? idx : nil
+    }
+
     /// Top edge of the session list, mirroring the draw() layout.
     private func sessionsTop() -> CGFloat {
         return bounds.height - L.padTop
@@ -98,7 +115,9 @@ final class HUDView: NSView {
     }
 
     var sessionMenu: ((Session) -> NSMenu)?
+    var onGaugeClick: ((String, NSEvent) -> Void)?
     private var hoverIndex: Int? { didSet { if oldValue != hoverIndex { needsDisplay = true } } }
+    private var hoverGauge: Int? { didSet { if oldValue != hoverGauge { needsDisplay = true } } }
 
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
@@ -109,15 +128,22 @@ final class HUDView: NSView {
     }
 
     override func mouseMoved(with event: NSEvent) {
-        hoverIndex = sessionIndex(at: convert(event.locationInWindow, from: nil))
+        let p = convert(event.locationInWindow, from: nil)
+        hoverIndex = sessionIndex(at: p)
+        let g = gaugeIndex(at: p)
+        hoverGauge = (g != nil && snapshot.gauges[g!].title == "RAM") ? g : nil
     }
 
-    override func mouseExited(with event: NSEvent) { hoverIndex = nil }
+    override func mouseExited(with event: NSEvent) { hoverIndex = nil; hoverGauge = nil }
 
     override func mouseDown(with event: NSEvent) {
         let p = convert(event.locationInWindow, from: nil)
         if toggleRect().insetBy(dx: -4, dy: -4).contains(p) {
             onToggle?()
+            return
+        }
+        if let i = gaugeIndex(at: p), snapshot.gauges[i].title == "RAM" {
+            onGaugeClick?(snapshot.gauges[i].title, event)
             return
         }
         window?.performDrag(with: event)      // keep the panel draggable
@@ -240,7 +266,13 @@ final class HUDView: NSView {
         var y = bounds.height - L.padTop
 
         // ---- gauges
-        for g in snapshot.gauges {
+        for (gi, g) in snapshot.gauges.enumerated() {
+            if gi == hoverGauge {
+                let band = NSRect(x: L.padX - 5, y: y - L.gaugeH + 6,
+                                  width: w - (L.padX - 5) * 2, height: L.gaugeH - 2)
+                NSColor.white.withAlphaComponent(0.07).setFill()
+                NSBezierPath(roundedRect: band, xRadius: 4, yRadius: 4).fill()
+            }
             y -= 15
             let dim: CGFloat = g.stale ? 0.45 : 1.0
             text(g.title, x: L.padX, y: y, size: 11.5, weight: .semibold, alpha: 0.92 * dim)
@@ -370,6 +402,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         view.compact = compact
         view.onToggle = { [weak self] in self?.toggleCompact() }
         view.sessionMenu = { [weak self] s in self?.buildSessionMenu(s) ?? NSMenu() }
+        view.onGaugeClick = { [weak self] title, event in
+            guard title == "RAM" else { return }
+            self?.showMemoryBreakdown(event)
+        }
         blur.addSubview(view)
         panel.contentView = blur
 
@@ -478,6 +514,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         done.informativeText = String(format: "약 %.0fMB 회수됨", mb)
         done.addButton(withTitle: "확인")
         done.runModal()
+    }
+
+    /// Clicking the RAM row opens the per-app breakdown behind the number.
+    private func showMemoryBreakdown(_ event: NSEvent) {
+        let apps = view.snapshot.topMemory
+        let m = NSMenu()
+        let head = m.addItem(withTitle: "메모리 상위", action: nil, keyEquivalent: "")
+        head.attributedTitle = NSAttributedString(string: "메모리 상위", attributes:
+            [.font: NSFont.systemFont(ofSize: 13, weight: .semibold)])
+
+        if apps.isEmpty {
+            m.addItem(withTitle: "데이터 없음", action: nil, keyEquivalent: "")
+        }
+        for a in apps {
+            let size = a.mb >= 1024 ? String(format: "%.2f GB", a.mb / 1024)
+                                    : String(format: "%.0f MB", a.mb)
+            /* 긴 프로세스 이름(com.apple.WebKit.WebContent 등)이 열을 밀지 않게 자른다. */
+            let name = a.name.count > 22 ? String(a.name.prefix(21)) + "…" : a.name
+            var line = String(format: "%-22@ %8@", name as NSString, size as NSString)
+            /* 한 프로세스가 그룹의 절반을 넘으면 그게 원인일 확률이 높다.
+               탭 30개가 조금씩 쓰는 것과 확장 하나가 새는 것은 대응이 다르다. */
+            if a.count > 1 && a.maxMb > a.mb * 0.5 {
+                line += String(format: "  (한 프로세스가 %.0fMB)", a.maxMb)
+            } else if a.count > 1 {
+                line += String(format: "  (%d개)", a.count)
+            }
+            let it = m.addItem(withTitle: line, action: nil, keyEquivalent: "")
+            it.attributedTitle = NSAttributedString(string: line, attributes:
+                [.font: NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .regular)])
+        }
+
+        m.addItem(.separator())
+        if let g = view.snapshot.gauges.first(where: { $0.title == "RAM" }) {
+            m.addItem(withTitle: g.detail, action: nil, keyEquivalent: "")
+        }
+        m.popUp(positioning: nil, at: event.locationInWindow, in: view.superview)
     }
 
     private func buildSessionMenu(_ s: Session) -> NSMenu {
@@ -701,7 +773,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if let d = json["disk"] as? [String: Any], let f = d["free"] as? Double {
             sum.diskFree = f / gb
         }
-        return Snapshot(gauges: gauges, sessions: sessions, summary: sum)
+        var top: [MemApp] = []
+        for raw in (json["top_memory"] as? [[String: Any]] ?? []) {
+            top.append(MemApp(name: raw["name"] as? String ?? "?",
+                              mb: raw["mb"] as? Double ?? 0,
+                              maxMb: raw["max"] as? Double ?? 0,
+                              count: raw["count"] as? Int ?? 0))
+        }
+        return Snapshot(gauges: gauges, sessions: sessions, summary: sum, topMemory: top)
     }
 }
 
