@@ -290,11 +290,35 @@ PLAN_HISTORY = os.path.join(HOME, "Library", "Application Support", "Claude",
                             "plan-usage-history.json")
 
 
+def _infer_reset(samples, window_s=5 * 3600):
+    """Claude's 5h window has no resets_at in this file, so read it from the curve.
+
+    Utilisation only ever climbs inside a window; a sharp drop is the window
+    turning over. The last drop marks a block start, and blocks are `window_s`
+    long — walk forward from there to the block that contains now.
+    """
+    prev, start = None, None
+    for sample in samples:
+        fh = (sample.get("u") or {}).get("fh")
+        if fh is None:
+            continue
+        if prev is not None and fh < prev - 5:
+            start = sample.get("t", 0) / 1000.0
+        prev = fh
+    if not start:
+        return None
+    now = time.time()
+    while start + window_s <= now:
+        start += window_s          # the observed block expired; step to the current one
+    return start + window_s
+
+
 def desktop_plan_usage():
     """The Claude desktop app samples real plan utilisation every ~15 minutes.
 
     Same numbers the statusLine hook reports, but recorded without a terminal
     session — so this keeps working while you live in VS Code or the app.
+    Sampling stops when the app is idle, so a reading can outlive its own window.
     """
     try:
         with open(PLAN_HISTORY) as f:
@@ -309,7 +333,7 @@ def desktop_plan_usage():
         return None
     return {"five_hour": float(u["fh"]),
             "seven_day": float(u["sd"]) if u.get("sd") is not None else None,
-            "five_reset": None,
+            "five_reset": _infer_reset(samples),
             "as_of": last.get("t", 0) / 1000.0,
             "source": "desktop"}
 
@@ -433,6 +457,36 @@ def _compute_ceiling(days=30, window=5 * 3600):
     return best
 
 
+def calibrate_ceiling_from_history():
+    """Back-calculate the 5h ceiling from the newest usable real reading.
+
+    Anchoring only calibrates while a reading is live. When the app has been idle
+    the reading expires before that happens, so derive it here too: take the last
+    sample with a meaningful percentage and the local spend in its own block.
+    """
+    try:
+        with open(PLAN_HISTORY) as f:
+            samples = json.load(f).get("samples") or []
+    except Exception:
+        return
+    reset = _infer_reset(samples)
+    if not reset:
+        return
+    # walk back to the block that the newest usable sample belongs to
+    for sample in reversed(samples):
+        pct = (sample.get("u") or {}).get("fh")
+        ts = sample.get("t", 0) / 1000.0
+        if pct is None or pct <= 5 or not ts:
+            continue
+        block_start = reset - 5 * 3600
+        while ts < block_start:
+            block_start -= 5 * 3600
+        spend = sum(c for t, c, _ in cost_events_since(block_start) if t <= ts)
+        if spend > 0:
+            _save_implied_ceiling(spend / (pct / 100.0))
+        return
+
+
 def claude_ceiling(current, refresh_after=86400):
     """Cached ceiling, recomputed daily; raised immediately if today exceeds it."""
     data = {}
@@ -443,7 +497,10 @@ def claude_ceiling(current, refresh_after=86400):
         pass
     if time.time() - data.get("at", 0) > refresh_after:
         try:
-            data = {"at": time.time(), "ceiling": _compute_ceiling(), "source": "history"}
+            # merge, do not replace — the implied ceiling is calibrated against a
+            # real reading and is far better than the history estimate.
+            data.update({"at": time.time(), "ceiling": _compute_ceiling(),
+                         "source": "history"})
             with open(CEILING_PATH, "w") as f:
                 json.dump(data, f)
         except Exception:
@@ -455,9 +512,9 @@ def claude_ceiling(current, refresh_after=86400):
     if current > ceiling:                 # new record — the ceiling was too low
         ceiling = current
         try:
+            data.update({"ceiling": ceiling, "source": "current"})
             with open(CEILING_PATH, "w") as f:
-                json.dump({"at": data.get("at", time.time()), "ceiling": ceiling,
-                           "source": "current"}, f)
+                json.dump(data, f)
         except Exception:
             pass
     return max(ceiling, 1.0)
@@ -737,6 +794,7 @@ def claude_sessions(prefer_custom=True):
 def main():
     c = cfg()
     cl = claude_usage()
+    calibrate_ceiling_from_history()
     if c.get("claude_5h_budget_usd"):
         budget = max(c["claude_5h_budget_usd"], 0.01)   # manual override
     else:
@@ -748,13 +806,25 @@ def main():
         "budget": budget,
         "measured": False,
     }
+    now = time.time()
     real = best_real_usage()
-    anchored = anchored_claude(real, time.time())
+    anchored = anchored_claude(real, now)
+
+    # A reading only describes its own 5-hour block. The desktop app stops
+    # sampling while it is idle, so the newest reading can outlive its block —
+    # showing that percentage afterwards is not stale, it is simply wrong.
+    expired_block_start = None
     if not anchored and real and real["five_hour"] is not None:
-        anchored = {"pct": real["five_hour"], "cost": cl["cost"], "tokens": cl["tokens"],
-                    "fresh": time.time() - (real.get("as_of") or 0) < 300,
-                    "anchor_pct": real["five_hour"], "anchor_at": real.get("as_of") or 0,
-                    "resets_at": real.get("five_reset")}
+        reset = real.get("five_reset")
+        block_start = (reset - 5 * 3600) if reset else None
+        if block_start and (real.get("as_of") or 0) < block_start:
+            expired_block_start = block_start
+        else:
+            anchored = {"pct": real["five_hour"], "cost": cl["cost"], "tokens": cl["tokens"],
+                        "fresh": now - (real.get("as_of") or 0) < 300,
+                        "anchor_pct": real["five_hour"], "anchor_at": real.get("as_of") or 0,
+                        "resets_at": reset}
+
     if anchored:
         claude.update({
             "pct": anchored["pct"],
@@ -768,8 +838,26 @@ def main():
             "anchor_pct": anchored["anchor_pct"],
             "anchor_at": anchored["anchor_at"],
         })
+    elif expired_block_start:
+        # No usable reading for the block we are in — fall back to local tokens
+        # measured over this block, scaled by the ceiling back-calculated from
+        # earlier real readings. Approximate, and labelled as such.
+        ev = cost_events_since(expired_block_start)
+        cost = sum(c for _, c, _ in ev)
+        claude.update({
+            "pct": min(cost / budget * 100, 100),
+            "value": cost,
+            "tokens": sum(t for _, _, t in ev),
+            "measured": False,
+            "mode": "estimate",
+            "weekly": real.get("seven_day"),
+            "resets_at": real.get("five_reset"),
+            "block_start": expired_block_start,
+            "stale_reading_at": real.get("as_of"),
+        })
     else:
         claude["mode"] = "estimate"
+
     result = {
         "generated_at": time.time(),
         "claude": claude,
