@@ -187,9 +187,14 @@ def memory_usage():
         except Exception:
             pressure = 1
 
+        # macOS's own pressure level is the primary signal — it is what the
+        # kernel actually acts on.
         severity = 2 if pressure >= 4 else (1 if pressure >= 2 else 0)
-        if severity == 0 and swap_total and swap_used / swap_total > 0.75:
-            severity = 1                      # leaning hard on swap
+        # Secondary: heavy paging measured against physical RAM. Not against
+        # swap_total — macOS resizes the swap file as usage falls, so the
+        # used/total ratio can climb while actual paging drops.
+        if severity == 0 and total and swap_used > total * 0.25:
+            severity = 1
 
         return {"used": used, "total": total, "free": total - used,
                 "pct": used / total * 100 if total else 0,

@@ -655,6 +655,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let gb = 1024.0 * 1024 * 1024
             let sev = m["severity"] as? Int ?? 0
             var detail = String(format: "%.1f / %.0fGB", used / gb, total / gb)
+            /* 스왑 total 은 macOS 가 동적으로 조절하므로 비율 대신 절대량만 쓴다. */
             if let sw = m["swap_used"] as? Double, sw > 0.2 * gb {
                 detail += String(format: "  스왑 %.1fG", sw / gb)
             }

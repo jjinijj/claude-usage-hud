@@ -52,7 +52,9 @@ else:
 m=d.get("memory")
 if m:
     lv={0:"정상",1:"경고",2:"위험"}.get(m["severity"],"?")
-    sw = ("  스왑 %.1fG/%.1fG" % (m["swap_used"]/2**30, m["swap_total"]/2**30)) if m["swap_total"] else ""
+    # 스왑 total 은 macOS 가 수시로 늘렸다 줄이므로 비율은 뜻이 없다. 절대량과
+    # 물리 메모리 대비 비중만 보여준다.
+    sw = ("  스왑 %.1fG (물리의 %.0f%%)" % (m["swap_used"]/2**30, m["swap_used"]/m["total"]*100)) if m["swap_used"] else ""
     print("RAM     %.0f%% 사용   (%.1fGB / %.0fGB, 여유 %.1fGB)  압박 %s%s" % (
         m["pct"], m["used"]/2**30, m["total"]/2**30, m["free"]/2**30, lv, sw))
 if k: print("Disk    %.0f%% 사용   (%.0fGB 여유 / %.0fGB)" % (k["pct"],k["free"]/2**30,k["total"]/2**30))
