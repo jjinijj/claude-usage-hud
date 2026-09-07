@@ -43,7 +43,7 @@ grep -q '\$0.killable' src/UsageHUD.swift || UNGUARDED=1
 echo "== 5. 추적 파일"
 UNEXPECTED=$(git ls-files | grep -vE '^(\.gitignore|\.githooks/.*|LICENSE|README\.md|config\.example\.json|install\.sh|uninstall\.sh|build\.sh|assets/AppIcon\.icns|bin/hud|src/.*|tools/.*)$' | wc -l | tr -d ' ')
 [ "$UNEXPECTED" = 0 ] && ok "예상 밖 파일 없음" || { bad "예상 밖 파일:"; git ls-files | grep -vE '^(\.gitignore|\.githooks/.*|LICENSE|README\.md|config\.example\.json|install\.sh|uninstall\.sh|build\.sh|assets/AppIcon\.icns|bin/hud|src/.*|tools/.*)$' | sed 's/^/      /'; }
-[ "$(git ls-files | grep -cE '\.(ceiling|toolstats|ratelimits)\.json|UsageHUD\.app/')" = 0 ] \
+[ "$(git ls-files | grep -cE '\.(ceiling|toolstats|ratelimits|diskscan)\.json|UsageHUD\.app/')" = 0 ] \
   && ok "캐시·빌드 산출물 미포함" || bad "캐시 파일이 추적되고 있음"
 
 echo
