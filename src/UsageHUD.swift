@@ -355,6 +355,79 @@ final class HUDView: NSView {
     }
 }
 
+
+// MARK: - Mascot
+
+/*
+ * 활성 세션 하나당 캐릭터 하나를 HUD 위쪽에 앉힌다.
+ *
+ * **별도 창인 이유.** HUD 안에 투명 영역을 두면 그 영역이 뒤쪽 창의 클릭을
+ * 가로챈다. HUD 는 항상 최상단이라 빈 공간이 클릭을 먹으면 거슬린다. macOS 의
+ * 클릭 통과(`ignoresMouseEvents`)는 창 단위라, 창을 나눠야 캐릭터 영역만
+ * 통과시킬 수 있다.
+ */
+final class MascotView: NSView {
+    var sheets: [NSImage] = []
+    var sessions: [Session] = [] { didSet { needsDisplay = true } }
+    var tick = 0 { didSet { needsDisplay = true } }
+
+    static let frames = 6
+    static let big: CGFloat = 64      // 128 의 1/2 — 정수배라야 픽셀 격자가 안 깨진다
+    static let small: CGFloat = 32    // 128 의 1/4
+
+    /// 세션 수에 따라 크기와 수용 개수를 정한다.
+    static func layout(count: Int, width: CGFloat) -> (size: CGFloat, gap: CGFloat, cap: Int) {
+        for (size, gap) in [(big, CGFloat(6)), (small, CGFloat(3))] {
+            let cap = Int((width - gap) / (size + gap))
+            if count <= cap { return (size, gap, cap) }
+            if size == small { return (size, gap, max(cap, 1)) }
+        }
+        return (small, 3, 1)
+    }
+
+    /*
+     * 시트와 시작 프레임을 pid 로 정한다. 난수를 쓰면 갱신(15초)마다 캐릭터가
+     * 바뀌어 깜빡인다. 해시는 세션이 사는 동안 같은 값을 준다 — 겉보기엔
+     * 무작위이면서 안정적이다. 시작 프레임을 어긋나게 해야 여럿이 같은 동작을
+     * 하지 않는다.
+     */
+    private func spec(_ pid: Int32) -> (sheet: Int, phase: Int) {
+        let h = Int(pid) &* 2654435761
+        return (abs(h) % max(sheets.count, 1), abs(h / 13) % Self.frames)
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        guard !sheets.isEmpty, !sessions.isEmpty else { return }
+        NSGraphicsContext.current?.imageInterpolation = .none   // 픽셀아트
+
+        let (size, gap, cap) = Self.layout(count: sessions.count, width: bounds.width)
+        let shown = min(sessions.count, cap)
+        var x = gap
+
+        for s in sessions.prefix(shown) {
+            let (sheet, phase) = spec(s.pid)
+            let f = (tick + phase) % Self.frames
+            let img = sheets[sheet]
+            img.draw(in: NSRect(x: x, y: 0, width: size, height: size),
+                     from: NSRect(x: CGFloat(f) * 128, y: 0, width: 128, height: 128),
+                     operation: .sourceOver, fraction: 1.0)
+            x += size + gap
+        }
+
+        if sessions.count > shown {
+            let more = "+\(sessions.count - shown)"
+            let attrs: [NSAttributedString.Key: Any] = [
+                .font: NSFont.monospacedDigitSystemFont(ofSize: 10, weight: .semibold),
+                .foregroundColor: NSColor.white.withAlphaComponent(0.55)]
+            NSAttributedString(string: more, attributes: attrs).draw(at: NSPoint(x: x, y: 4))
+        }
+    }
+}
+
+final class MascotPanel: NSPanel {
+    override var canBecomeKey: Bool { false }
+}
+
 // MARK: - Panel
 
 final class HUDPanel: NSPanel {
@@ -372,6 +445,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var timer: Timer?
     private var sessionCount = 0
     private var compact = false
+    private var mascot: MascotPanel!
+    private var mascotView: MascotView!
+    private var animTimer: Timer?
     private let scriptURL = URL(fileURLWithPath: NSHomeDirectory())
         .appendingPathComponent("Applications/UsageHUD/stats.py")
 
@@ -418,6 +494,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         blur.addSubview(view)
         panel.contentView = blur
 
+        setUpMascot()
+
         panel.menu = buildMenu()
         panel.menu?.delegate = self
         view.menu = panel.menu
@@ -432,7 +510,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         NotificationCenter.default.addObserver(
             forName: NSWindow.didMoveNotification, object: panel, queue: .main
-        ) { [weak self] _ in self?.saveFrame() }
+        ) { [weak self] _ in self?.saveFrame(); self?.syncMascot() }
     }
 
     private func buildMenu() -> NSMenu {
@@ -685,6 +763,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard abs(f.width - t.width) > 0.5 || abs(f.height - t.height) > 0.5 else { return }
         panel.setFrame(NSRect(x: f.minX, y: f.maxY - t.height, width: t.width, height: t.height),
                        display: true, animate: animated)
+        syncMascot()
     }
 
     private func resize(sessions: Int) {
@@ -701,6 +780,75 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         saveFrame()
     }
 
+
+    // MARK: mascot
+
+    private func setUpMascot() {
+        let dir = URL(fileURLWithPath: NSHomeDirectory())
+            .appendingPathComponent("Applications/UsageHUD")
+        let sheets = ["char-a.png", "char-b.png"].compactMap {
+            NSImage(contentsOf: dir.appendingPathComponent($0))
+        }
+
+        mascotView = MascotView(frame: .zero)
+        mascotView.sheets = sheets
+        mascotView.autoresizingMask = [.width, .height]
+
+        mascot = MascotPanel(contentRect: NSRect(x: 0, y: 0, width: L.width, height: MascotView.big),
+                             styleMask: [.borderless, .nonactivatingPanel],
+                             backing: .buffered, defer: false)
+        mascot.isFloatingPanel = true
+        mascot.level = .statusBar
+        mascot.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary,
+                                     .ignoresCycle]
+        mascot.hidesOnDeactivate = false
+        mascot.backgroundColor = .clear
+        mascot.isOpaque = false
+        mascot.hasShadow = false
+        mascot.ignoresMouseEvents = true      // 뒤쪽 창의 클릭을 가로채지 않는다
+        mascot.contentView = mascotView
+    }
+
+    /// HUD 위쪽 가장자리에 왼쪽 맞춤으로 붙인다.
+    private func syncMascot() {
+        guard let mascot, mascotView != nil else { return }
+        let f = panel.frame
+        let n = mascotView.sessions.count
+        guard n > 0 else { return }
+        let (size, _, _) = MascotView.layout(count: n, width: f.width)
+        /* 위에 자리가 없으면(HUD 가 화면 꼭대기에 있을 때) 아래로 내린다 —
+           그대로 두면 메뉴바를 침범하거나 화면 밖으로 나간다. */
+        let top = NSScreen.screens.first { $0.frame.intersects(f) }?.visibleFrame.maxY
+        let above = f.maxY + size <= (top ?? .greatestFiniteMagnitude)
+        let y = above ? f.maxY : f.minY - size
+        mascot.setFrame(NSRect(x: f.minX, y: y, width: f.width, height: size), display: true)
+    }
+
+    /*
+     * 유휴가 아닌 세션만 띄운다. 보이지 않을 때는 타이머를 멈춘다 — 전부 유휴일
+     * 때 초당 8번씩 다시 그릴 이유가 없다.
+     */
+    private func updateMascot(_ all: [Session]) {
+        guard mascotView != nil else { return }
+        let active = all.filter { $0.state != "idle" }
+        mascotView.sessions = active
+
+        if active.isEmpty {
+            animTimer?.invalidate(); animTimer = nil
+            mascot.orderOut(nil)
+            return
+        }
+        syncMascot()
+        mascot.orderFrontRegardless()
+        if animTimer == nil {
+            animTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 8.0, repeats: true) {
+                [weak self] _ in
+                guard let self, self.mascotView != nil else { return }
+                self.mascotView.tick = (self.mascotView.tick + 1) % MascotView.frames
+            }
+        }
+    }
+
     // MARK: data
 
     @objc private func refresh() {
@@ -710,6 +858,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             DispatchQueue.main.async {
                 self.resize(sessions: snap.sessions.count)
                 self.view.snapshot = snap
+                self.updateMascot(snap.sessions)
             }
         }
     }
