@@ -17,6 +17,15 @@ let cols = 3, rows = 2, scale = 4
 let out = 128                 // 512 / 4 — 이 그림의 논리 해상도
 let bottomMargin = 3
 
+/*
+ * 알파는 0 아니면 255 로 자른다. 생성된 시트는 배경이 완전 투명이 아니라
+ * a=16~31 의 옅은 안개가 깔려 있는 경우가 있다. 그대로 두면 캐릭터 뒤에
+ * 회색 사각형이 비치고, 경계 판정도 안개를 내용으로 세어 프레임마다
+ * 크기가 달라진다. 실제 내용은 a>=240 에 몰려 있어서 128 로 잘라도
+ * 여유가 크다.
+ */
+let alphaCut: UInt8 = 128
+
 guard CommandLine.arguments.count >= 3 else {
     print("usage: make-sprites <input> <output.png>"); exit(1)
 }
@@ -44,7 +53,7 @@ let dRow = dst.bytesPerRow
 for r in 0..<rows { for c in 0..<cols {
     let idx = r * cols + c, ox = c * cw, oy = r * ch
     var minX = cw, maxX = -1, minY = ch, maxY = -1
-    for y in 0..<ch { for x in 0..<cw where alphaAt(ox + x, oy + y) > 25 {
+    for y in 0..<ch { for x in 0..<cw where alphaAt(ox + x, oy + y) >= alphaCut {
         if x < minX { minX = x }; if x > maxX { maxX = x }
         if y < minY { minY = y }; if y > maxY { maxY = y }
     }}
@@ -61,10 +70,11 @@ for r in 0..<rows { for c in 0..<cols {
         let dx = idx * out + left + x, dy = top + y
         guard dx >= 0, dx < dst.pixelsWide, dy >= 0, dy < dst.pixelsHigh else { continue }
         let s = sy * sRow + sx * sSPP, d = dy * dRow + dx * 4
+        guard sSPP < 4 || sBuf[s + 3] >= alphaCut else { continue }   // 투명은 건너뛴다
         dBuf[d]     = sBuf[s]
         dBuf[d + 1] = sBuf[s + (sSPP > 1 ? 1 : 0)]
         dBuf[d + 2] = sBuf[s + (sSPP > 2 ? 2 : 0)]
-        dBuf[d + 3] = sSPP < 4 ? 255 : sBuf[s + 3]
+        dBuf[d + 3] = 255
     }}
     print(String(format: "  프레임 %d  %3dx%3d → x:%3d y:%3d", idx + 1, sw, sh, left, top))
 }}

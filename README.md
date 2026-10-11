@@ -171,13 +171,18 @@ Codex 는 사용량 게이지(5시간·주간 %)에만 쓰입니다.
 `char-b.webp` 로 두고:
 
 ```
-swift tools/make-sprites.swift
+swift tools/make-sprites.swift assets/src/char-a.webp assets/char-a.png
+swift tools/make-sprites.swift assets/src/char-b.webp assets/char-b.png
 ```
 
 프레임별 가로·바닥 편차를 바닥 중앙 기준으로 맞춘 뒤 4:1 로 축소해
 `assets/char-{a,b}.png` (768×128 가로 스트립) 를 만듭니다. 축소는 4×4 블록의 중앙
 픽셀을 뽑는 방식이라 보간으로 윤곽이 흐려지지 않습니다. 그리기도
 `NSImageInterpolation.none` 입니다.
+
+알파는 128 을 기준으로 0 아니면 255 로 자릅니다. 생성된 시트는 배경이 완전 투명이
+아니라 `a=16~31` 쯤의 옅은 안개가 깔려 있는 경우가 있는데, 그대로 두면 캐릭터 뒤에
+회색 사각형이 비치고 경계 판정도 안개를 내용으로 세어 프레임마다 크기가 달라집니다.
 
 ## 조작
 
