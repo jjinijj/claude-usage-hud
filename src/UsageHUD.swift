@@ -366,12 +366,15 @@ final class HUDView: NSView {
  * 클릭 통과(`ignoresMouseEvents`)는 창 단위라, 창을 나눠야 캐릭터 영역만
  * 통과시킬 수 있다.
  */
+private func gcd(_ a: Int, _ b: Int) -> Int { b == 0 ? a : gcd(b, a % b) }
+
 final class MascotView: NSView {
-    var sheets: [NSImage] = []
+    /* 시트마다 프레임 수가 다르다(6, 8, ...). 스트립은 프레임당 128px 이라
+       폭에서 바로 알아낸다 — 시트를 추가할 때 고칠 상수가 없다. */
+    var sheets: [(image: NSImage, frames: Int)] = []
     var sessions: [Session] = [] { didSet { needsDisplay = true } }
     var tick = 0 { didSet { needsDisplay = true } }
 
-    static let frames = 6
     static let big: CGFloat = 64      // 128 의 1/2 — 정수배라야 픽셀 격자가 안 깨진다
     static let small: CGFloat = 32    // 128 의 1/4
 
@@ -393,7 +396,13 @@ final class MascotView: NSView {
      */
     private func spec(_ pid: Int32) -> (sheet: Int, phase: Int) {
         let h = Int(pid) &* 2654435761
-        return (abs(h) % max(sheets.count, 1), abs(h / 13) % Self.frames)
+        let i = abs(h) % max(sheets.count, 1)
+        return (i, abs(h / 13) % max(sheets.indices.contains(i) ? sheets[i].frames : 1, 1))
+    }
+
+    /// 틱이 모든 시트의 프레임 수로 나누어떨어지는 주기. 넘치지 않게 여기서 되돌린다.
+    var tickPeriod: Int {
+        sheets.map(\.frames).reduce(1) { a, b in b == 0 ? a : a / gcd(a, b) * b }
     }
 
     override func draw(_ dirtyRect: NSRect) {
@@ -406,8 +415,8 @@ final class MascotView: NSView {
 
         for s in sessions.prefix(shown) {
             let (sheet, phase) = spec(s.pid)
-            let f = (tick + phase) % Self.frames
-            let img = sheets[sheet]
+            let (img, fc) = sheets[sheet]
+            let f = (tick + phase) % max(fc, 1)
             img.draw(in: NSRect(x: x, y: 0, width: size, height: size),
                      from: NSRect(x: CGFloat(f) * 128, y: 0, width: 128, height: 128),
                      operation: .sourceOver, fraction: 1.0)
@@ -786,8 +795,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func setUpMascot() {
         let dir = URL(fileURLWithPath: NSHomeDirectory())
             .appendingPathComponent("Applications/UsageHUD")
-        let sheets = ["char-a.png", "char-b.png"].compactMap {
-            NSImage(contentsOf: dir.appendingPathComponent($0))
+        /* 폴더의 char-*.png 를 전부 읽는다. 시트를 더 넣을 때 코드도 설치
+           스크립트도 고칠 필요가 없다. 프레임 수는 스트립 폭 / 128 이다. */
+        let names = ((try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? [])
+            .filter { $0.hasPrefix("char-") && $0.hasSuffix(".png") }.sorted()
+        let sheets: [(image: NSImage, frames: Int)] = names.compactMap { name in
+            guard let img = NSImage(contentsOf: dir.appendingPathComponent(name)),
+                  let rep = img.representations.first else { return nil }
+            let n = rep.pixelsWide / 128
+            guard n > 0, rep.pixelsHigh == 128 else { return nil }
+            return (img, n)
         }
 
         mascotView = MascotView(frame: .zero)
@@ -844,7 +861,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             animTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 8.0, repeats: true) {
                 [weak self] _ in
                 guard let self, self.mascotView != nil else { return }
-                self.mascotView.tick = (self.mascotView.tick + 1) % MascotView.frames
+                self.mascotView.tick = (self.mascotView.tick + 1) % max(self.mascotView.tickPeriod, 1)
             }
         }
     }

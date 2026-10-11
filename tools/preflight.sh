@@ -42,7 +42,7 @@ grep -q '\$0.killable' src/UsageHUD.swift || UNGUARDED=1
 
 echo "== 5. 추적 파일"
 # 저장소에 있어야 할 파일 목록. 두 군데서 쓰므로 한 곳에만 둔다.
-ALLOWED='^(\.gitignore|\.githooks/.*|LICENSE|README\.md|config\.example\.json|install\.sh|uninstall\.sh|build\.sh|assets/(AppIcon\.icns|(char-[ab]|mascot)\.png|src/char-[ab]\.webp)|bin/hud|src/.*|tools/.*)$'
+ALLOWED='^(\.gitignore|\.githooks/.*|LICENSE|README\.md|config\.example\.json|install\.sh|uninstall\.sh|build\.sh|assets/(AppIcon\.icns|(char-[a-z]|mascot)\.png|src/char-[a-z]\.webp)|bin/hud|src/.*|tools/.*)$'
 UNEXPECTED=$(git ls-files | grep -vE "$ALLOWED" | wc -l | tr -d ' ')
 [ "$UNEXPECTED" = 0 ] && ok "예상 밖 파일 없음" || { bad "예상 밖 파일:"; git ls-files | grep -vE "$ALLOWED" | sed 's/^/      /'; }
 [ "$(git ls-files | grep -cE '\.(ceiling|toolstats|ratelimits|diskscan)\.json|UsageHUD\.app/')" = 0 ] \

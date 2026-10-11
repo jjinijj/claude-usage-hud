@@ -16,7 +16,7 @@ mkdir -p "$DEST" "$BIN"
 cp "$REPO/src/stats.py" "$REPO/src/statusline.py" "$REPO/src/UsageHUD.swift" "$DEST/"
 cp "$REPO/build.sh" "$DEST/"; chmod +x "$DEST/build.sh"
 cp "$REPO/assets/AppIcon.icns" "$DEST/"
-cp "$REPO/assets/char-a.png" "$REPO/assets/char-b.png" "$DEST/"
+cp "$REPO"/assets/char-*.png "$DEST/"
 [ -f "$DEST/config.json" ] || cp "$REPO/config.example.json" "$DEST/config.json"
 cp "$REPO/bin/hud" "$BIN/hud"; chmod +x "$BIN/hud"
 
