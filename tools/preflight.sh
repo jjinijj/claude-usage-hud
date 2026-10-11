@@ -41,8 +41,10 @@ grep -q '\$0.killable' src/UsageHUD.swift || UNGUARDED=1
 [ "$UNGUARDED" = 0 ] && ok "모든 종료 경로에 프로세스 검증" || bad "검증 없는 종료 경로 존재"
 
 echo "== 5. 추적 파일"
-UNEXPECTED=$(git ls-files | grep -vE '^(\.gitignore|\.githooks/.*|LICENSE|README\.md|config\.example\.json|install\.sh|uninstall\.sh|build\.sh|assets/(AppIcon\.icns|char-[ab]\.png|src/char-[ab]\.webp)|bin/hud|src/.*|tools/.*)$' | wc -l | tr -d ' ')
-[ "$UNEXPECTED" = 0 ] && ok "예상 밖 파일 없음" || { bad "예상 밖 파일:"; git ls-files | grep -vE '^(\.gitignore|\.githooks/.*|LICENSE|README\.md|config\.example\.json|install\.sh|uninstall\.sh|build\.sh|assets/(AppIcon\.icns|char-[ab]\.png|src/char-[ab]\.webp)|bin/hud|src/.*|tools/.*)$' | sed 's/^/      /'; }
+# 저장소에 있어야 할 파일 목록. 두 군데서 쓰므로 한 곳에만 둔다.
+ALLOWED='^(\.gitignore|\.githooks/.*|LICENSE|README\.md|config\.example\.json|install\.sh|uninstall\.sh|build\.sh|assets/(AppIcon\.icns|(char-[ab]|mascot)\.png|src/char-[ab]\.webp)|bin/hud|src/.*|tools/.*)$'
+UNEXPECTED=$(git ls-files | grep -vE "$ALLOWED" | wc -l | tr -d ' ')
+[ "$UNEXPECTED" = 0 ] && ok "예상 밖 파일 없음" || { bad "예상 밖 파일:"; git ls-files | grep -vE "$ALLOWED" | sed 's/^/      /'; }
 [ "$(git ls-files | grep -cE '\.(ceiling|toolstats|ratelimits|diskscan)\.json|UsageHUD\.app/')" = 0 ] \
   && ok "캐시·빌드 산출물 미포함" || bad "캐시 파일이 추적되고 있음"
 
