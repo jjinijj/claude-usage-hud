@@ -456,6 +456,15 @@ def best_real_usage():
     return best
 
 
+# 보정이 성립하려면 기준점이 신선하고, 기준점까지의 비용이 블록에서 충분한 몫을
+# 차지해야 한다. 분모가 작으면 비율법의 지렛대가 폭주한다 — $17 를 분모로 두면
+# $17 쓸 때마다 11%p 씩 뛴다. 실제로 그래서 15% 를 93% 로 표시한 적이 있다.
+ANCHOR_MAX_AGE = 3600      # 기준점이 1시간보다 낡으면 외삽하지 않는다
+MIN_DENOM_SHARE = 0.5      # 기준점까지의 비용이 블록 전체의 절반 미만이면 포기.
+                           # 이 값이 곧 배율 상한이다 — 0.5 면 기준점의 2배를 못 넘는다.
+MIN_PCT_FOR_CEILING = 10   # 이보다 작은 수치로는 천장을 역산하지 않는다
+
+
 def anchored_claude(real, now):
     """Scale the last real reading by how much local usage grew since it was taken.
 
@@ -471,13 +480,17 @@ def anchored_claude(real, now):
     anchor_at = real.get("as_of") or 0
     if anchor_at < block_start:
         return None
+    if now - anchor_at > ANCHOR_MAX_AGE:  # 너무 낡아 외삽 거리가 길다
+        return None
     ev = cost_events_since(block_start)
     total = sum(c for _, c, _ in ev)
     upto = sum(c for ts, c, _ in ev if ts <= anchor_at)
     if upto <= 0:
         return None
+    if total > 0 and upto / total < MIN_DENOM_SHARE:
+        return None                       # 분모가 빈약해 비율이 못 믿을 값이 된다
     pct = min(real["five_hour"] * total / upto, 100.0)
-    if real["five_hour"] > 5:            # too small a reading gives a wild ceiling
+    if real["five_hour"] >= MIN_PCT_FOR_CEILING:
         _save_implied_ceiling(upto / (real["five_hour"] / 100.0))
     return {"pct": pct,
             "cost": total,
@@ -902,11 +915,11 @@ def main():
     else:
         budget = claude_ceiling(cl["cost"])             # auto-calibrated from history
     claude = {
-        "pct": min(cl["cost"] / budget * 100, 100),
         "value": cl["cost"],
         "tokens": cl["tokens"],
         "budget": budget,
         "measured": False,
+        "mode": "unknown",
     }
     now = time.time()
     real = best_real_usage()
@@ -915,13 +928,11 @@ def main():
     # A reading only describes its own 5-hour block. The desktop app stops
     # sampling while it is idle, so the newest reading can outlive its block —
     # showing that percentage afterwards is not stale, it is simply wrong.
-    expired_block_start = None
     if not anchored and real and real["five_hour"] is not None:
         reset = real.get("five_reset")
         block_start = (reset - 5 * 3600) if reset else None
-        if block_start and (real.get("as_of") or 0) < block_start:
-            expired_block_start = block_start
-        else:
+        if block_start and (real.get("as_of") or 0) >= block_start \
+                and now - (real.get("as_of") or 0) <= ANCHOR_MAX_AGE:
             anchored = {"pct": real["five_hour"], "cost": cl["cost"], "tokens": cl["tokens"],
                         "fresh": now - (real.get("as_of") or 0) < 300,
                         "anchor_pct": real["five_hour"], "anchor_at": real.get("as_of") or 0,
@@ -940,25 +951,23 @@ def main():
             "anchor_pct": anchored["anchor_pct"],
             "anchor_at": anchored["anchor_at"],
         })
-    elif expired_block_start:
-        # No usable reading for the block we are in — fall back to local tokens
-        # measured over this block, scaled by the ceiling back-calculated from
-        # earlier real readings. Approximate, and labelled as such.
-        ev = cost_events_since(expired_block_start)
-        cost = sum(c for _, c, _ in ev)
-        claude.update({
-            "pct": min(cost / budget * 100, 100),
-            "value": cost,
-            "tokens": sum(t for _, _, t in ev),
-            "measured": False,
-            "mode": "estimate",
-            "weekly": real.get("seven_day"),
-            "resets_at": real.get("five_reset"),
-            "block_start": expired_block_start,
-            "stale_reading_at": real.get("as_of"),
-        })
     else:
-        claude["mode"] = "estimate"
+        # 쓸 수 있는 기준점이 없다. 예전에는 로컬 비용을 역산 천장으로 나눠
+        # "추정 %" 를 띄웠지만, 그 천장은 과거 표본에서 35배까지 흩어져 숫자가
+        # 사실상 무의미했다. 한도는 Anthropic 이 % 로만 알려주고 토큰이나
+        # 달러로는 환산할 방법이 없다. 그래서 % 를 내보내지 않는다 —
+        # 비용·토큰·리셋 시각은 실측이므로 그대로 둔다.
+        claude.update({
+            "weekly": (real or {}).get("seven_day"),
+            "resets_at": (real or {}).get("five_reset"),
+            "stale_reading_at": (real or {}).get("as_of"),
+            "stale_reading_pct": (real or {}).get("five_hour"),
+        })
+        # 사용자가 config 에서 천장을 직접 정했다면 그건 본인이 고른 기준이므로
+        # 존중한다. 자동 역산 천장과 달리 어디서 왔는지 사용자가 안다.
+        if c.get("claude_5h_budget_usd"):
+            claude.update({"pct": min(cl["cost"] / budget * 100, 100),
+                           "mode": "estimate"})
 
     result = {
         "generated_at": time.time(),

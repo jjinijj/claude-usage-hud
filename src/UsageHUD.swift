@@ -904,18 +904,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func parse(_ json: [String: Any]) -> Snapshot {
         var gauges: [Gauge] = []
 
-        if let c = json["claude"] as? [String: Any],
-           let pct = c["pct"] as? Double, let value = c["value"] as? Double,
-           let budget = c["budget"] as? Double {
-            let measured = c["measured"] as? Bool ?? false
-            let detail: String
-            if measured {
-                let weekly = (c["weekly"] as? Double).map { String(format: " · 주 %.0f%%", $0) } ?? ""
-                detail = String(format: "5h %.0f%%", pct) + weekly
+        if let c = json["claude"] as? [String: Any] {
+            let weekly = (c["weekly"] as? Double).map { String(format: " · 주 %.0f%%", $0) } ?? ""
+            if let pct = c["pct"] as? Double {
+                let measured = c["measured"] as? Bool ?? false
+                let detail = measured
+                    ? String(format: "5h %.0f%%", pct) + weekly
+                    : String(format: "5h ~%.0f%%", pct) + weekly
+                gauges.append(Gauge(title: "Claude", detail: detail, pct: pct))
             } else {
-                detail = String(format: "5h ~%.0f%%  ($%.0f/%.0f)", pct, value, budget)
+                /* 한도는 서버가 % 로만 알려주고, 토큰이나 달러로 환산할 방법이
+                   없다. 기준점이 없을 때 지어낸 % 를 띄우면 그냥 틀린 값이다
+                   (한번은 15% 를 93% 로 보여줬다). 아는 것만 적는다. */
+                let tok = (c["tokens"] as? Double) ?? 0
+                var detail = "5h 기준 없음"
+                if tok > 0 { detail += String(format: "  %.0fM tokens", tok / 1_000_000) }
+                detail += weekly
+                gauges.append(Gauge(title: "Claude", detail: detail, pct: nil, stale: true))
             }
-            gauges.append(Gauge(title: "Claude", detail: detail, pct: pct))
         } else {
             gauges.append(Gauge(title: "Claude", detail: "데이터 없음", pct: nil))
         }

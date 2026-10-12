@@ -22,25 +22,30 @@ case "${1:-start}" in
 import json,sys,time
 d=json.load(sys.stdin)
 c=d["claude"]; x=d.get("codex"); k=d.get("disk")
-if c.get("measured"):
+if c.get("pct") is not None:
     wk = ("  주 %.0f%%" % c["weekly"]) if c.get("weekly") is not None else ""
     rs = ""
     if c.get("resets_at"):
         rs = "  리셋 " + time.strftime("%H:%M", time.localtime(c["resets_at"]))
-    tag = {"live":"실측","anchored":"실측+보정"}.get(c.get("mode"),"실측")
-    if c.get("mode")=="anchored":
-        tag += " (%.0f%% @ %s 기준)" % (c["anchor_pct"], time.strftime("%H:%M", time.localtime(c["anchor_at"])))
+    if c.get("measured"):
+        tag = {"live":"실측","anchored":"실측+보정"}.get(c.get("mode"),"실측")
+        if c.get("mode")=="anchored":
+            tag += " (%.0f%% @ %s 기준)" % (c["anchor_pct"], time.strftime("%H:%M", time.localtime(c["anchor_at"])))
+    else:
+        tag = "추정 (config 천장 %.0f)" % c.get("budget", 0)
     print("Claude  5h  %.0f%% [%s]%s%s   $%.0f 상당  %.1fM tokens" % (c["pct"], tag, wk, rs, c["value"], c["tokens"]/1e6))
 else:
-    blk = ""
-    if c.get("block_start"):
-        blk = "  블록 %s~%s" % (time.strftime("%H:%M", time.localtime(c["block_start"])),
-                                time.strftime("%H:%M", time.localtime(c["resets_at"])) if c.get("resets_at") else "?")
-    old = ""
-    if c.get("stale_reading_at"):
-        old = "  (직전 블록 실측은 %s 것이라 버림)" % time.strftime("%H:%M", time.localtime(c["stale_reading_at"]))
+    # 한도는 서버가 % 로만 알려준다. 기준점이 없으면 환산할 길이 없으므로
+    # 지어낸 숫자 대신 아는 것만 적는다.
     wk = ("  주 %.0f%%" % c["weekly"]) if c.get("weekly") is not None else ""
-    print("Claude  5h  ~%.0f%% (추정)%s%s   $%.0f / 천장 %.0f%s" % (c["pct"], wk, blk, c["value"], c["budget"], old))
+    rs = ("  리셋 " + time.strftime("%H:%M", time.localtime(c["resets_at"]))) if c.get("resets_at") else ""
+    old = ""
+    if c.get("stale_reading_at") is not None and c.get("stale_reading_pct") is not None:
+        old = "  (마지막 실측 %.0f%% @ %s)" % (c["stale_reading_pct"],
+              time.strftime("%m-%d %H:%M", time.localtime(c["stale_reading_at"])))
+    print("Claude  5h  기준 없음%s%s   $%.0f 상당  %.1fM tokens%s"
+          % (wk, rs, c["value"], c["tokens"]/1e6, old))
+    print("        한도 % 를 보려면 터미널에서 claude 를 띄우거나 Claude 데스크톱 앱을 켜 두세요.")
 if x and x.get("expired"):
     print("Codex   만료   (%.0f시간 전 기록 — 5시간 창이 이미 지났습니다)" % ((time.time()-x["as_of"])/3600))
 elif x and x.get("primary_pct") is not None:
