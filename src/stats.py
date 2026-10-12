@@ -11,6 +11,9 @@ DEFAULTS = {
     "disk_volume": "/System/Volumes/Data",
     # True: 직접 정한 세션 제목 사용 / False: Claude가 만든 짧은 이름 사용
     "prefer_custom_title": True,
+    # 서버에 사용률을 직접 물어본다. 켜면 키체인의 OAuth 토큰을 읽어
+    # api.anthropic.com 에 요청한다 — 기본은 끔. README 의 "정확한 사용률" 참고.
+    "use_oauth_usage": False,
 }
 # $ per 1M tokens: input, output, cache-write(5m), cache-read
 PRICES = {
@@ -440,9 +443,113 @@ def desktop_plan_usage():
             "source": "desktop"}
 
 
+# OAUTH-BEGIN  (preflight 가 이 구간만 자격증명·통신을 허용한다)
+# ── 서버에 직접 묻기 (옵트인) ────────────────────────────────────────────────
+#
+# 로컬 파일만으로는 한도를 알 수 없다. Anthropic 은 한도를 % 로만 알려주고,
+# 로컬에서 센 토큰을 % 로 환산할 방법이 없다(과거 표본에서 35배까지 흩어졌다).
+# 이 엔드포인트가 유일하게 정확한 출처다.
+#
+# 켜면 키체인에서 OAuth 토큰을 읽어 쓴다. 토큰은 메모리에만 두고 파일·로그·
+# 예외 메시지 어디에도 남기지 않는다 — 아래 _scrub 가 그 마지막 방어선이다.
+OAUTH_URL = "https://api.anthropic.com/api/oauth/usage"
+OAUTH_BETA = "oauth-2025-04-20"
+OAUTH_CACHE = os.path.join(HOME, "Applications", "UsageHUD", ".oauthusage.json")
+OAUTH_TTL = 60          # HUD 는 15초마다 돌지만 서버는 분당 한 번이면 충분하다
+
+
+def _scrub(text, secret):
+    """토큰이 섞여 나갈 수 있는 모든 출구에서 지운다."""
+    if not secret:
+        return text
+    return str(text).replace(secret, "<TOKEN>")
+
+
+def _oauth_token():
+    """키체인에서 access token 을 꺼낸다. (토큰, 만료epoch) 또는 (None, None)."""
+    try:
+        r = subprocess.run(["security", "find-generic-password",
+                            "-s", "Claude Code-credentials", "-w"],
+                           capture_output=True, text=True, timeout=10)
+        if r.returncode != 0:
+            return None, None
+        o = json.loads(r.stdout.strip())
+    except Exception:
+        return None, None
+    o = o.get("claudeAiOauth") or o
+    tok = o.get("accessToken")
+    exp = o.get("expiresAt")
+    if isinstance(exp, (int, float)) and exp > 1e12:
+        exp /= 1000.0
+    return (tok, exp) if isinstance(tok, str) and tok else (None, None)
+
+
+def _iso_epoch(s):
+    try:
+        return datetime.fromisoformat(str(s).replace("Z", "+00:00")).timestamp()
+    except Exception:
+        return None
+
+
+def oauth_usage():
+    """서버가 보고한 사용률. 끄면/실패하면 None 이라 기존 경로로 떨어진다."""
+    try:
+        with open(OAUTH_CACHE) as f:
+            c = json.load(f)
+        if time.time() - c.get("as_of", 0) < OAUTH_TTL:
+            return c
+    except Exception:
+        pass
+
+    tok, exp = _oauth_token()
+    if not tok:
+        return None
+    if exp and exp < time.time():
+        return None          # 만료된 토큰으로 부르면 401 만 받는다
+
+    import urllib.request, urllib.error
+    req = urllib.request.Request(OAUTH_URL, headers={
+        "Authorization": "Bearer " + tok,
+        "anthropic-beta": OAUTH_BETA,
+        "Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            body = r.read().decode()
+    except Exception as e:
+        sys.stderr.write("oauth usage 실패: " + _scrub(e, tok) + "\n")
+        return None
+    finally:
+        tok = None           # 참조를 더 들고 있지 않는다
+
+    try:
+        d = json.loads(body)
+    except Exception:
+        return None
+    fh, sd = d.get("five_hour") or {}, d.get("seven_day") or {}
+    if fh.get("utilization") is None:
+        return None
+    out = {"five_hour": float(fh["utilization"]),
+           "seven_day": float(sd["utilization"]) if sd.get("utilization") is not None else None,
+           "five_reset": _iso_epoch(fh.get("resets_at")),
+           "as_of": time.time(),
+           "source": "oauth"}
+    try:
+        with open(OAUTH_CACHE, "w") as f:
+            json.dump(out, f)      # 토큰은 담기지 않는다 — 수치와 시각뿐
+    except OSError:
+        pass
+    return out
+
+
+# OAUTH-END
+
+
 def best_real_usage():
     """Freshest of the two real sources: the desktop history file or the hook cache."""
-    cands = [c for c in (desktop_plan_usage(), claude_rate_limits()) if c]
+    cands = [desktop_plan_usage(), claude_rate_limits()]
+    if cfg().get("use_oauth_usage"):
+        cands.append(oauth_usage())
+    cands = [c for c in cands if c]
     if not cands:
         return None
     best = max(cands, key=lambda c: c.get("as_of") or 0)

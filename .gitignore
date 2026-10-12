@@ -3,5 +3,6 @@
 .ratelimits.json
 .toolstats.json
 .diskscan.json
+.oauthusage.json
 config.json
 .DS_Store
