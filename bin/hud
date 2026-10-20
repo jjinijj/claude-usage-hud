@@ -117,14 +117,17 @@ def pad(t,n):
         t+="\u2026"
     return t+" "*max(n-dw(t),1)
 
-tgt=[s for s in ss if s["state"]=="idle" and (s["age"] or 0) > hours*3600 and s["pid"] not in chain and s.get("killable")]
+# 같은 대화가 두 곳에 열려 있으면 pid 가 여럿이다. 하나라도 내 조상이면 건너뛴다.
+def pids_of(s): return s.get("pids") or [s["pid"]]
+tgt=[s for s in ss if s["state"]=="idle" and (s["age"] or 0) > hours*3600
+     and not (set(pids_of(s)) & chain) and s.get("killable")]
 skipped=[s for s in ss if s["state"]!="idle" and (s["age"] or 0) > hours*3600]
 if not tgt:
     print("%.0f시간 넘게 유휴인 세션이 없습니다." % hours); raise SystemExit(0)
 print("%.0f시간 넘게 유휴인 세션 %d개 (대화 기록은 보존됩니다):\n" % (hours, len(tgt)))
 for s in tgt:
     a=s["age"] or 0
-    print("  " + pad(s["name"],38) + "%6.1fh %7.0fMB  pid %s" % (a/3600, s.get("mem") or 0, s["pid"]))
+    print("  " + pad(s["name"],38) + "%6.1fh %7.0fMB  pid %s" % (a/3600, s.get("mem") or 0, ",".join(str(p) for p in pids_of(s))))
 free=sum(s.get("mem") or 0 for s in tgt)
 print("\n회수 예상: %.0f MB" % free)
 if skipped: print("작업 중이라 제외: %d개" % len(skipped))
@@ -138,8 +141,11 @@ if not yes:
 
 killed=0
 for s in tgt:
-    try: os.kill(s["pid"], 15); killed+=1
-    except Exception as e: print("  실패 pid %s: %s" % (s["pid"], e))
+    ok=False
+    for p in pids_of(s):
+        try: os.kill(p, 15); ok=True
+        except Exception as e: print("  실패 pid %s: %s" % (p, e))
+    if ok: killed+=1
 print("\n%d개 종료됨, 약 %.0f MB 회수. 이어서 하려면 claude --resume 또는 VS Code에서 세션을 다시 여세요." % (killed, free))
 ' ;;
   config)  ${EDITOR:-open} "$DIR/config.json" ;;

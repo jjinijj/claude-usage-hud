@@ -455,7 +455,8 @@ def desktop_plan_usage():
 OAUTH_URL = "https://api.anthropic.com/api/oauth/usage"
 OAUTH_BETA = "oauth-2025-04-20"
 OAUTH_CACHE = os.path.join(HOME, "Applications", "UsageHUD", ".oauthusage.json")
-OAUTH_TTL = 60          # HUD 는 15초마다 돌지만 서버는 분당 한 번이면 충분하다
+OAUTH_TTL = 300         # 5분. 60초로 뒀더니 429(Too Many Requests)를 받았다.
+OAUTH_BACKOFF = 900     # 실패하면 이만큼 쉰다 — 실패를 빠르게 반복하면 더 막힌다
 
 
 def _scrub(text, secret):
@@ -496,7 +497,9 @@ def oauth_usage():
     try:
         with open(OAUTH_CACHE) as f:
             c = json.load(f)
-        if time.time() - c.get("as_of", 0) < OAUTH_TTL:
+        if time.time() < c.get("retry_after", 0):
+            return None                      # 아직 쉬는 중
+        if c.get("five_hour") is not None and time.time() - c.get("as_of", 0) < OAUTH_TTL:
             return c
     except Exception:
         pass
@@ -517,6 +520,12 @@ def oauth_usage():
             body = r.read().decode()
     except Exception as e:
         sys.stderr.write("oauth usage 실패: " + _scrub(e, tok) + "\n")
+        # 실패를 빠르게 반복하면 429 를 더 오래 받는다. 쉬는 시간을 캐시에 적어둔다.
+        try:
+            with open(OAUTH_CACHE, "w") as f:
+                json.dump({"as_of": time.time(), "retry_after": time.time() + OAUTH_BACKOFF}, f)
+        except OSError:
+            pass
         return None
     finally:
         tok = None           # 참조를 더 들고 있지 않는다
@@ -992,6 +1001,7 @@ def claude_sessions(prefer_custom=True):
         else:
             name, source = derived, "derived"
         out.append({
+            "sid": s.get("sessionId", ""),
             "pid": pid,
             "name": name,
             "title_source": source,
@@ -1009,6 +1019,34 @@ def claude_sessions(prefer_custom=True):
         r["killable"] = bool(is_claude)
     order = {"stuck": 0, "error": 1, "attention": 2, "slow": 3,
              "working": 4, "running": 5, "idle": 6}
+
+    # 같은 대화를 Code 탭과 VS Code 에서 동시에 열면 pid 가 둘이 되고 레지스트리에도
+    # 두 줄로 들어간다. 그대로 두면 세션이 둘로 세어지고 마스코트도 둘이 뜬다 —
+    # 같은 대화인데 pid 해시가 달라 생김새까지 달라서 완전히 다른 세션처럼 보인다.
+    #
+    # 대표는 상태가 가장 급한 쪽이다(working 이 idle 을 이긴다). 메모리는 둘 다
+    # 실제로 쓰므로 더한다. pids 를 남겨 종료할 때 둘 다 보낼 수 있게 한다.
+    merged = {}
+    for r in out:
+        k = r.get("sid") or "pid:%d" % r["pid"]
+        cur = merged.get(k)
+        if cur is None:
+            r["pids"] = [r["pid"]]
+            r["where_all"] = [r["where"]] if r.get("where") else []
+            merged[k] = r
+            continue
+        cur["pids"].append(r["pid"])
+        if r.get("where") and r["where"] not in cur["where_all"]:
+            cur["where_all"].append(r["where"])
+        if r.get("mem") is not None:
+            cur["mem"] = (cur.get("mem") or 0) + r["mem"]
+        if order.get(r["state"], 3) < order.get(cur["state"], 3):
+            for f in ("pid", "state", "age", "tool", "where", "killable"):
+                cur[f] = r.get(f)
+        elif r.get("age") is not None and (cur.get("age") is None or r["age"] < cur["age"]):
+            cur["age"] = r["age"]
+    out = list(merged.values())
+
     out.sort(key=lambda r: (order.get(r["state"], 3), r["age"] if r["age"] is not None else 1e9))
     return out
 

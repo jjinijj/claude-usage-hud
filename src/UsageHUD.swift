@@ -17,7 +17,13 @@ struct Session {
     var age: Double?
     var mem: Double?       // MB
     var pid: Int32 = 0
+    /* 같은 대화가 Code 탭과 VS Code 에 동시에 열리면 프로세스가 둘이다.
+       stats.py 가 sessionId 로 합치므로, 종료할 때는 전부 보내야 반쪽이 안 남는다. */
+    var pids: [Int32] = []
     var killable = false   // verified to actually be a Claude Code process
+
+    /// 합쳐지기 전 프로세스 전부. 예전 형식(pids 없음)이면 대표 pid 하나.
+    var allPids: [Int32] { pids.isEmpty ? (pid > 0 ? [pid] : []) : pids }
 }
 
 struct MemApp {
@@ -379,6 +385,29 @@ final class MascotView: NSView {
     static let small: CGFloat = 32    // 128 의 1/4
 
     /// 세션 수에 따라 크기와 수용 개수를 정한다.
+    /// 지금 마우스가 올라가 있는 캐릭터. 말풍선 위치 계산에만 쓰고 그림은 안 바뀐다.
+    var hover: Int? = nil
+
+    /// 창 좌표의 점이 몇 번째 캐릭터 위인지. 사이 여백은 nil 이다.
+    func index(at p: NSPoint) -> Int? {
+        guard !sessions.isEmpty else { return nil }
+        let (size, gap, cap) = Self.layout(count: sessions.count, width: bounds.width)
+        let shown = min(sessions.count, cap)
+        for i in 0..<shown {
+            let x = gap + CGFloat(i) * (size + gap)
+            if NSRect(x: x, y: 0, width: size, height: size).contains(p) { return i }
+        }
+        return nil
+    }
+
+    /// 캐릭터의 창 좌표 사각형. 말풍선을 어디에 붙일지 정하는 데 쓴다.
+    func frame(of i: Int) -> NSRect? {
+        guard !sessions.isEmpty else { return nil }
+        let (size, gap, cap) = Self.layout(count: sessions.count, width: bounds.width)
+        guard i < min(sessions.count, cap) else { return nil }
+        return NSRect(x: gap + CGFloat(i) * (size + gap), y: 0, width: size, height: size)
+    }
+
     static func layout(count: Int, width: CGFloat) -> (size: CGFloat, gap: CGFloat, cap: Int) {
         for (size, gap) in [(big, CGFloat(6)), (small, CGFloat(3))] {
             let cap = Int((width - gap) / (size + gap))
@@ -437,6 +466,72 @@ final class MascotPanel: NSPanel {
     override var canBecomeKey: Bool { false }
 }
 
+/*
+ * 캐릭터에 마우스를 올리면 어느 세션인지 알려주는 말풍선.
+ *
+ * **또 별도 창인 이유.** 마스코트 창은 캐릭터 높이(64/32pt)에 딱 맞춰져 있어
+ * 말풍선이 들어갈 자리가 없다. 창을 키우면 HUD 위로 더 올라가 메뉴바를
+ * 침범하기 쉽다. 따로 띄우면 위가 좁을 때 아래로 내릴 수 있다.
+ *
+ * 호버 감지는 전역 마우스 감시 대신 마스코트 애니메이션 타이머(8fps)에서
+ * 마우스 위치를 확인한다. 감시자도 권한도 필요 없고, 말풍선에는 8fps 면 충분하다.
+ */
+final class BubbleView: NSView {
+    var text = "" { didSet { needsDisplay = true } }
+    var pointsDown = false      // 캐릭터가 아래에 있으면 꼬리가 아래를 향한다
+
+    static let pad: CGFloat = 7
+    static let tail: CGFloat = 5
+    static let font = NSFont.systemFont(ofSize: 11, weight: .medium)
+
+    static func size(for text: String) -> NSSize {
+        let w = (text as NSString).size(withAttributes: [.font: font]).width
+        return NSSize(width: min(w, 240) + pad * 2, height: 17 + pad * 2 + tail)
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        guard !text.isEmpty else { return }
+        let body = NSRect(x: 0, y: pointsDown ? Self.tail : 0,
+                          width: bounds.width, height: bounds.height - Self.tail)
+        let path = NSBezierPath(roundedRect: body, xRadius: 6, yRadius: 6)
+
+        // 꼬리. 말풍선이 캐릭터 어느 쪽에 붙었는지에 따라 방향이 뒤집힌다.
+        let tip = NSBezierPath()
+        let cx = bounds.midX
+        if pointsDown {
+            tip.move(to: NSPoint(x: cx - 5, y: Self.tail))
+            tip.line(to: NSPoint(x: cx + 5, y: Self.tail))
+            tip.line(to: NSPoint(x: cx, y: 0))
+        } else {
+            tip.move(to: NSPoint(x: cx - 5, y: bounds.height - Self.tail))
+            tip.line(to: NSPoint(x: cx + 5, y: bounds.height - Self.tail))
+            tip.line(to: NSPoint(x: cx, y: bounds.height))
+        }
+        tip.close()
+        path.append(tip)
+
+        NSColor(calibratedWhite: 0.13, alpha: 0.95).setFill()
+        path.fill()
+        NSColor(calibratedWhite: 1, alpha: 0.18).setStroke()
+        path.lineWidth = 1
+        path.stroke()
+
+        let para = NSMutableParagraphStyle()
+        para.lineBreakMode = .byTruncatingTail
+        para.alignment = .center
+        let attrs: [NSAttributedString.Key: Any] = [
+            .font: Self.font, .foregroundColor: NSColor.white.withAlphaComponent(0.92),
+            .paragraphStyle: para]
+        let tr = NSRect(x: Self.pad, y: body.minY + Self.pad,
+                        width: bounds.width - Self.pad * 2, height: 15)
+        (text as NSString).draw(in: tr, withAttributes: attrs)
+    }
+}
+
+final class BubblePanel: NSPanel {
+    override var canBecomeKey: Bool { false }
+}
+
 // MARK: - Panel
 
 final class HUDPanel: NSPanel {
@@ -455,6 +550,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var sessionCount = 0
     private var compact = false
     private var mascot: MascotPanel!
+    private var bubble: BubblePanel!
+    private var bubbleView: BubbleView!
     private var mascotView: MascotView!
     private var animTimer: Timer?
     private let scriptURL = URL(fileURLWithPath: NSHomeDirectory())
@@ -602,7 +699,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard alert.runModal() == .alertFirstButtonReturn else { return }
 
         var killed = 0
-        for v in victims where kill(v.pid, SIGTERM) == 0 { killed += 1 }
+        for v in victims where v.allPids.contains(where: { kill($0, SIGTERM) == 0 }) { killed += 1 }
         refresh()
 
         let done = NSAlert()
@@ -728,7 +825,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         NSApp.activate(ignoringOtherApps: true)
         guard alert.runModal() == .alertFirstButtonReturn else { return }
-        kill(s.pid, SIGTERM)
+        for p in s.allPids { kill(p, SIGTERM) }
         refresh()
     }
 
@@ -824,6 +921,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         mascot.hasShadow = false
         mascot.ignoresMouseEvents = true      // 뒤쪽 창의 클릭을 가로채지 않는다
         mascot.contentView = mascotView
+
+        bubbleView = BubbleView(frame: .zero)
+        bubbleView.autoresizingMask = [.width, .height]
+        bubble = BubblePanel(contentRect: NSRect(x: 0, y: 0, width: 10, height: 10),
+                             styleMask: [.borderless, .nonactivatingPanel],
+                             backing: .buffered, defer: false)
+        bubble.isFloatingPanel = true
+        bubble.level = .statusBar
+        bubble.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary,
+                                     .ignoresCycle]
+        bubble.hidesOnDeactivate = false
+        bubble.backgroundColor = .clear
+        bubble.isOpaque = false
+        bubble.hasShadow = false
+        bubble.ignoresMouseEvents = true
+        bubble.contentView = bubbleView
     }
 
     /// HUD 위쪽 가장자리에 왼쪽 맞춤으로 붙인다.
@@ -845,6 +958,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
      * 유휴가 아닌 세션만 띄운다. 보이지 않을 때는 타이머를 멈춘다 — 전부 유휴일
      * 때 초당 8번씩 다시 그릴 이유가 없다.
      */
+    /// 마우스가 어느 캐릭터 위인지 보고 말풍선을 붙인다. 8fps 타이머에서 부른다.
+    private func updateBubble() {
+        guard let mascot, mascot.isVisible, mascotView != nil, bubble != nil else { return }
+        let p = mascot.convertPoint(fromScreen: NSEvent.mouseLocation)
+        let i = mascotView.index(at: p)
+        mascotView.hover = i
+
+        guard let i, i < mascotView.sessions.count, let f = mascotView.frame(of: i) else {
+            bubble.orderOut(nil); return
+        }
+        let name = mascotView.sessions[i].name
+        guard !name.isEmpty else { bubble.orderOut(nil); return }
+
+        if bubbleView.text != name { bubbleView.text = name }
+        let sz = BubbleView.size(for: name)
+
+        /* 캐릭터 위에 붙이되, 위가 좁으면 아래로 내린다 — 마스코트 창 자체와
+           같은 판단이라 화면 밖으로 나가지 않는다. */
+        let charRect = mascot.convertToScreen(f)
+        let top = NSScreen.screens.first { $0.frame.intersects(charRect) }?.visibleFrame.maxY
+        let above = charRect.maxY + sz.height <= (top ?? .greatestFiniteMagnitude)
+        bubbleView.pointsDown = above
+        let y = above ? charRect.maxY : charRect.minY - sz.height
+        var x = charRect.midX - sz.width / 2
+        if let scr = NSScreen.screens.first(where: { $0.frame.intersects(charRect) }) {
+            x = min(max(x, scr.visibleFrame.minX + 4), scr.visibleFrame.maxX - sz.width - 4)
+        }
+        bubble.setFrame(NSRect(x: x, y: y, width: sz.width, height: sz.height), display: true)
+        bubble.orderFrontRegardless()
+    }
+
     private func updateMascot(_ all: [Session]) {
         guard mascotView != nil else { return }
         let active = all.filter { $0.state != "idle" }
@@ -852,6 +996,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         if active.isEmpty {
             animTimer?.invalidate(); animTimer = nil
+            mascotView.hover = nil
+            bubble?.orderOut(nil)
             mascot.orderOut(nil)
             return
         }
@@ -862,6 +1008,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 [weak self] _ in
                 guard let self, self.mascotView != nil else { return }
                 self.mascotView.tick = (self.mascotView.tick + 1) % max(self.mascotView.tickPeriod, 1)
+                self.updateBubble()
             }
         }
     }
@@ -973,6 +1120,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                                     age: raw["age"] as? Double,
                                     mem: raw["mem"] as? Double,
                                     pid: Int32((raw["pid"] as? Int) ?? 0),
+                                    pids: (raw["pids"] as? [Int] ?? []).map { Int32($0) },
                                     killable: raw["killable"] as? Bool ?? false))
         }
 
